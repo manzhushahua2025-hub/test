@@ -20,29 +20,25 @@ def get_best_sql_driver():
     try:
         installed_drivers = [d for d in pyodbc.drivers()]
     except Exception:
-        return "SQL Server" # 如果获取失败，返回保底驱动
+        return "SQL Server" 
     
-    # 驱动优先级列表 (越靠前越好)
     driver_preference = [
-        "ODBC Driver 18 for SQL Server",   # 最新版
-        "ODBC Driver 17 for SQL Server",   # 主流版
-        "ODBC Driver 13 for SQL Server",   # 旧版
-        "SQL Server Native Client 11.0",   # SQL 2012 时代
-        "SQL Server Native Client 10.0",   # SQL 2008 时代
-        "SQL Server"                       # Windows XP/7/10/11 自带通用驱动 (保底)
+        "ODBC Driver 18 for SQL Server",   
+        "ODBC Driver 17 for SQL Server",   
+        "ODBC Driver 13 for SQL Server",   
+        "SQL Server Native Client 11.0",   
+        "SQL Server Native Client 10.0",   
+        "SQL Server"                       
     ]
 
     for drv in driver_preference:
         if drv in installed_drivers:
             return drv
     
-    # 如果一个都没找到，返回默认值尝试
     return "SQL Server"
 
-# 动态获取当前电脑的最佳驱动
 CURRENT_DRIVER = get_best_sql_driver()
 
-# 构造连接字符串
 DB_CONN_STRING = (
     f"DRIVER={{{CURRENT_DRIVER}}};"
     "SERVER=192.168.0.117;"
@@ -55,15 +51,14 @@ DB_CONN_STRING = (
 print(f"系统启动: 检测到并使用数据库驱动 -> {CURRENT_DRIVER}")
 
 # 截图中的关键配置
-ROW_IDX_HEADER_MAIN = 2  # 主表头所在行
-ROW_IDX_HEADER_DATE = 3  # 日期表头所在行
-ROW_IDX_DATA_START = 4   # 数据起始行
+ROW_IDX_HEADER_MAIN = 2  
+ROW_IDX_HEADER_DATE = 3  
+ROW_IDX_DATA_START = 4   
 
 COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
 COL_NAME_WO_NO = "工单单号"
 
-# 设定要保留的列索引 (1-based, 对应 Excel 的 A=1, B=2...)
 KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 
 
@@ -72,25 +67,20 @@ KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v5.3 (含净需求列) - 驱动: {CURRENT_DRIVER}")
-        self.root.geometry("1100x700") #稍微加宽窗口
+        self.root.title(f"每日排程齐套分析工具 v5.4 (数据逻辑闭环版) - 驱动: {CURRENT_DRIVER}")
+        self.root.geometry("1100x700")
 
-        # 样式定义
         self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
         self.green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
         self.header_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
         self.thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
                                   top=Side(style='thin'), bottom=Side(style='thin'))
 
-        # 变量绑定
         self.file_path = tk.StringVar()
         self.sheet_name = tk.StringVar()
         self.selected_workshop = tk.StringVar()
-
-        # 日期范围控制
         self.is_date_range = tk.BooleanVar(value=False)
 
-        # 缓存数据
         self.date_column_map = {}
         self.col_map_main = {}
         self.header_names_map = {}
@@ -101,7 +91,6 @@ class DailyPlanAvailabilityApp:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 1. 文件选择
         file_frame = ttk.LabelFrame(main_frame, text="1. 数据源", padding="5")
         file_frame.pack(fill=tk.X, pady=5)
 
@@ -113,11 +102,9 @@ class DailyPlanAvailabilityApp:
         self.sheet_combo.pack(side=tk.LEFT, padx=5)
         self.sheet_combo.bind("<<ComboboxSelected>>", self._on_sheet_selected)
 
-        # 2. 筛选设置
         filter_frame = ttk.LabelFrame(main_frame, text="2. 计划筛选", padding="10")
         filter_frame.pack(fill=tk.X, pady=5)
 
-        # --- 日期选择区域 ---
         date_frame = ttk.Frame(filter_frame)
         date_frame.pack(side=tk.LEFT, fill=tk.X)
 
@@ -140,20 +127,16 @@ class DailyPlanAvailabilityApp:
                                            width=20)
         self.workshop_combo.pack(side=tk.LEFT, padx=5)
 
-        # 3. 操作区
         action_frame = ttk.LabelFrame(main_frame, text="3. 执行", padding="10")
         action_frame.pack(fill=tk.X, pady=10)
 
         btn = ttk.Button(action_frame, text="生成缺料分析文件 (另存为)", command=self._run_analysis_batch)
         btn.pack(fill=tk.X, padx=100)
 
-        # 4. 日志
         self.log_text = tk.Text(main_frame, height=15, state="disabled", font=("Consolas", 9), bg="#F0F0F0")
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=5)
         
         self._log(f"程序已启动。当前使用数据库驱动: {CURRENT_DRIVER}")
-        if CURRENT_DRIVER == "SQL Server":
-            self._log("警告: 未检测到ODBC Driver 17/18，正在使用系统自带老版本驱动，可能会影响性能。")
 
     def _toggle_date_mode(self):
         if self.is_date_range.get():
@@ -414,7 +397,6 @@ class DailyPlanAvailabilityApp:
             batch_conds = conditions[i:i + batch_size]
             where_sql = " OR ".join(batch_conds)
 
-            # 查询增加 MB.MB004 (单位)
             sql = f"""
                 SELECT 
                     RTRIM(TA.TA001) as ta001, RTRIM(TA.TA002) as ta002, 
@@ -466,9 +448,15 @@ class DailyPlanAvailabilityApp:
 
     def _simulate(self, plans_data, wo_data, inventory):
         """
-        修正逻辑：
-        1. 保持原有的最小齐套率计算逻辑（min(stock/net_demand)）。
-        2. 新增 max_net_demand_sets (工单净需求)，用于Excel展示分母，方便核对数据。
+        核心逻辑修正：
+        为了确保 Excel 中的数据闭环 (可产 / 净需求 = 齐套率)，
+        '净需求' 列必须显示为 [限制了齐套率的那个短板需求量]。
+        
+        逻辑：
+        1. 初始 effective_demand_sets = daily_qty (排产数)
+        2. 遍历物料，如果某个物料受 ERP 剩余量限制（ERP剩余 < 理论需求），
+           则 effective_demand_sets 被拉低到该物料支持的最大套数。
+        3. 最终 Rate = Achievable / effective_demand_sets
         """
         running_inv = inventory.copy()
         calculated_results = []
@@ -482,7 +470,7 @@ class DailyPlanAvailabilityApp:
             res_item = {
                 'rate': 0.0,
                 'achievable': 0,
-                'net_demand_sets': 0, # 新增：净需求套数 (分母)
+                'net_demand_sets': 0, 
                 'shortage_str': "",
                 'is_short': False
             }
@@ -495,17 +483,14 @@ class DailyPlanAvailabilityApp:
 
             wo_total_qty = info['total']
 
-            min_kitting_rate = 1.0 
+            # effective_demand_sets: 记录本单的“有效净需求”。
+            # 初始值为排产数。如果有物料因ERP未领量限制而只能做更少，这个值会变小。
+            effective_demand_sets = daily_qty
+            
             min_possible_sets = 9999999
-            
-            # 用于记录该工单在ERP层面最大的“净需求套数”
-            # 即：这单实际还需要多少套料？
-            max_net_demand_sets = 0.0 
-            
             shortage_details_list = []
             to_deduct = {}
             is_fully_kitted = True
-
             has_requirement = False 
 
             for bom in info['bom']:
@@ -514,15 +499,16 @@ class DailyPlanAvailabilityApp:
                 unit_usage = bom['req'] / wo_total_qty if wo_total_qty > 0 else 0
                 theo_demand = daily_qty * unit_usage
                 
-                # 净需求
+                # 净需求：取 (ERP剩余未领) 和 (本次排产理论需领) 的较小值
                 net_demand = min(remain_issue, theo_demand)
                 
-                # 反推这一个物料对应的"套数需求"
-                # 用于计算 max_net_demand_sets (Excel显示用)
-                if unit_usage > 0:
-                    sets_demand = net_demand / unit_usage
-                    if sets_demand > max_net_demand_sets:
-                        max_net_demand_sets = sets_demand
+                # --- 关键修正：计算有效套数需求 ---
+                # 如果 ERP剩余量 < 理论需求，说明这个物料卡住了总需求上限
+                if theo_demand > 0 and remain_issue < theo_demand:
+                    # 计算这个物料对应的套数上限 (向下取整)
+                    if unit_usage > 0:
+                        constraint_sets = remain_issue / unit_usage
+                        effective_demand_sets = min(effective_demand_sets, constraint_sets)
 
                 if net_demand <= 0.0001: continue
                 
@@ -530,40 +516,38 @@ class DailyPlanAvailabilityApp:
                 to_deduct[part] = net_demand
                 current_stock = running_inv.get(part, 0)
 
-                # 1. 计算齐套率 (保持原有逻辑)
-                item_rate = current_stock / net_demand if net_demand > 0 else 1.0
-                if item_rate > 1.0: item_rate = 1.0
-                min_kitting_rate = min(min_kitting_rate, item_rate)
-
-                # 2. 计算可产数量
+                # 计算可产数量
                 can_make = int(current_stock // unit_usage) if unit_usage > 0 else 999999
                 min_possible_sets = min(min_possible_sets, can_make)
 
-                # 3. 记录缺料
+                # 记录缺料
                 if current_stock < net_demand - 0.0001:
                     is_fully_kitted = False
                     short_qty = net_demand - current_stock
                     unit_str = bom['unit']
                     shortage_details_list.append(f"{part} {bom['name']}(缺{short_qty:g}{unit_str})")
 
-            # 修正可产数量
+            # 修正可产数量 (不能超过有效需求)
+            # 例如：排产980，但ERP限制500。那可产数量上限就是500。
+            # 如果库存够做480，min(980, 500, 480) = 480。
             actual_possible_sets = min(int(daily_qty), min_possible_sets)
             
-            # 如果没有净需求（不需要领料）
+            # 如果没有物料需求
             if not has_requirement:
                 actual_possible_sets = int(daily_qty)
+                effective_demand_sets = int(daily_qty)
                 is_fully_kitted = True
-                min_kitting_rate = 1.0
-                max_net_demand_sets = 0 # 没有欠料
 
-            # 如果 max_net_demand_sets 为0 (可能是浮点误差或完全没需求)，但有排产，
-            # 为了数据展示，可以视为全齐套
-            if max_net_demand_sets < 0.0001 and has_requirement:
-                 max_net_demand_sets = daily_qty # 兜底逻辑
-
-            res_item['rate'] = min_kitting_rate
+            # 齐套率计算
+            # 现在 effective_demand_sets 已经变成了 500 (在你的例子中)
+            # 所以 480 / 500 = 96%
+            final_rate = 0.0
+            if effective_demand_sets > 0:
+                final_rate = actual_possible_sets / effective_demand_sets
+            
+            res_item['rate'] = final_rate
             res_item['achievable'] = actual_possible_sets
-            res_item['net_demand_sets'] = int(max_net_demand_sets) # 存入结果
+            res_item['net_demand_sets'] = int(effective_demand_sets) # 写入Excel的分母
             res_item['is_short'] = not is_fully_kitted
             
             if shortage_details_list:
@@ -586,7 +570,6 @@ class DailyPlanAvailabilityApp:
             cell.border = self.thin_border
             current_col += 1
 
-        # 修改表头：插入 "净需求"
         new_headers = ["齐套率", "可产数量", "净需求", "缺料信息"]
         for h in new_headers:
             cell = ws.cell(row=1, column=current_col)
@@ -631,7 +614,7 @@ class DailyPlanAvailabilityApp:
             c_qty.border = self.thin_border
             c_qty.alignment = align_center
             
-            # 净需求 (新增列)
+            # 净需求 (修正后)
             c_net = ws.cell(row=row_idx, column=current_col + 2)
             c_net.value = res['net_demand_sets']
             c_net.border = self.thin_border
@@ -651,11 +634,8 @@ class DailyPlanAvailabilityApp:
             c_net.fill = fill
             c_info.fill = fill
 
-        # 设置列宽
         ws.column_dimensions['A'].width = 15
-        # 缺料信息在最后一列 (index + 4)
         ws.column_dimensions[openpyxl.utils.get_column_letter(len(KEEP_COL_INDICES) + 4)].width = 60
-
 
 if __name__ == "__main__":
     try:
