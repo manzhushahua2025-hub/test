@@ -34,31 +34,33 @@ DB_CONN_STRING = (
     "UID=zhitan;PWD=Zt@forcome;TrustServerCertificate=yes;"
 )
 
-ROW_IDX_HEADER_MAIN = 3  
-ROW_IDX_HEADER_DATE = 3  
+# 关键设置：基础数据从第4行开始
 ROW_IDX_DATA_START = 4   
 
 COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
 COL_NAME_WO_NO = "工单单号"
 
-# --- 核心修改 1: 定义保留的列索引 ---
-# 移除了: 1(A列), 9(I列), 17(Q列), 18(R列)
-# 保留了: B-H, J-P, S, T (以及之后新增的列)
-KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 19, 20]
+# --- 核心修改：列筛选配置 ---
+# 范围：1到20列 (A-T)
+# 去除：1(A), 9(I), 17(Q), 18(R)
+# 保留：其余列
+FULL_COL_RANGE = range(1, 21) 
+REMOVE_COLS = [1, 9, 17, 18]
+KEEP_COL_INDICES = [c for c in FULL_COL_RANGE if c not in REMOVE_COLS]
 
 # ============== 应用程序类 ==============
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v10.3 (精简列版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析工具 v10.4 (混合表头适配版) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
         # 颜色定义
-        self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")     # 红色
-        self.green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")   # 绿色
-        self.yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")  # 黄色
-        self.gray_fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")    # 灰色
+        self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")     
+        self.green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")   
+        self.yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")  
+        self.gray_fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")    
         
         self.header_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
         self.thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
@@ -146,21 +148,35 @@ class DailyPlanAvailabilityApp:
         try:
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
             ws = wb[sheet_name]
+            
+            # --- 1. 混合扫描表头 (Row 2 和 Row 3) ---
+            # 解决表头在不同行的问题
             self.col_map_main = {}
             self.header_names_map = {}
-            # 从第3行读取基础表头
-            for idx, cell in enumerate(ws[ROW_IDX_HEADER_MAIN], start=1):
-                val = str(cell.value).strip() if cell.value else ""
-                if val: self.col_map_main[val] = idx
-                if idx in KEEP_COL_INDICES: self.header_names_map[idx] = val
             
+            # 先扫第3行(优先)，再扫第2行
+            for r in [3, 2]:
+                for idx, cell in enumerate(ws[r], start=1):
+                    val = str(cell.value).strip() if cell.value else ""
+                    if val:
+                        # 记录列名对应的索引
+                        if val not in self.col_map_main: 
+                            self.col_map_main[val] = idx
+                        # 如果这一列在我们保留的列表中，记录其名称作为新表头
+                        if idx in KEEP_COL_INDICES and idx not in self.header_names_map:
+                            self.header_names_map[idx] = val
+
+            # --- 2. 日期列扫描 (严格扫描第3行) ---
             self.date_column_map = {}
-            # 从第3行读取日期表头
-            for cell in ws[ROW_IDX_HEADER_DATE]:
+            for cell in ws[3]: # 假设日期只在第3行
                 val = cell.value
                 dt = self._parse_excel_date(val)
                 if dt: self.date_column_map[dt] = cell.column
             
+            # 检查关键列是否找到
+            if not self.col_map_main.get(COL_NAME_WO_NO):
+                self._log("警告: 未找到'工单单号'列，请检查表头是否在第2或3行。")
+
             col_ws_idx = self.col_map_main.get(COL_NAME_WORKSHOP)
             workshops = set()
             if col_ws_idx:
@@ -170,6 +186,11 @@ class DailyPlanAvailabilityApp:
             self.workshop_combo['values'] = ["全部车间"] + sorted(list(workshops))
             self.workshop_combo.current(0)
             self.workshop_combo.config(state="readonly")
+            
+            # 日志反馈
+            date_cnt = len(self.date_column_map)
+            self._log(f"分析完成: 找到 {date_cnt} 个日期列。")
+            
             wb.close()
         except Exception as e:
             traceback.print_exc()
@@ -184,7 +205,6 @@ class DailyPlanAvailabilityApp:
                 return (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(val))).date()
             if isinstance(val, str):
                 parts = val.strip().split('/')
-                # 增强的日期解析，适配截图中的 1/26 格式
                 if len(parts) >= 2:
                     try:
                         return datetime.datetime.strptime(val.strip(), "%Y/%m/%d").date()
@@ -222,7 +242,7 @@ class DailyPlanAvailabilityApp:
         
         valid_dates = [d for d in target_dates if d in self.date_column_map]
         if not valid_dates:
-            messagebox.showwarning("无有效日期", "所选日期在Excel表头中均未找到对应列。")
+            messagebox.showwarning("无有效日期", "所选日期在Excel第3行中均未找到对应列。")
             return
 
         date_str = valid_dates[0].strftime("%Y-%m-%d")
@@ -244,13 +264,14 @@ class DailyPlanAvailabilityApp:
             
             for d in valid_dates:
                 col_idx = self.date_column_map[d]
+                # 读取数据
                 plans = self._extract_data(file_path, sheet_name, col_idx, target_workshop)
                 all_plans_by_date[d] = plans
                 for p in plans:
                     all_wo_keys.add(p['wo_key'])
             
             if not all_wo_keys:
-                messagebox.showinfo("无数据", "所选日期范围内没有排产计划。")
+                messagebox.showinfo("无数据", "所选日期范围内没有排产计划(数量>0)。\n请确认Excel第3行的日期列与下方数据是否对齐。")
                 return
 
             self._log("正在查询ERP BOM和库存...")
@@ -298,9 +319,15 @@ class DailyPlanAvailabilityApp:
     def _extract_data(self, file_path, sheet_name, col_idx, filter_ws):
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         ws = wb[sheet_name]
+        
+        # 使用动态扫描到的列索引
         c_ws = self.col_map_main.get(COL_NAME_WORKSHOP)
         c_type = self.col_map_main.get(COL_NAME_WO_TYPE)
         c_no = self.col_map_main.get(COL_NAME_WO_NO)
+        
+        # 如果关键列没找到，尝试默认值（兼容旧模板）
+        if not c_type: c_type = 5 # E列
+        if not c_no: c_no = 6     # F列
         
         data = []
         for row in ws.iter_rows(min_row=ROW_IDX_DATA_START):
@@ -314,9 +341,12 @@ class DailyPlanAvailabilityApp:
                     if filter_ws != "全部车间" and curr_ws != filter_ws: continue
                     
                     row_dict = {}
-                    # 复制基础列 (根据精简后的KEEP_COL_INDICES)
+                    # 复制基础列
                     for ti in KEEP_COL_INDICES:
-                        row_dict[ti] = row[ti-1].value if ti <= len(row) else None
+                        if ti <= len(row):
+                            row_dict[ti] = row[ti-1].value
+                        else:
+                            row_dict[ti] = None
                     
                     wt = row[c_type-1].value
                     wn = row[c_no-1].value
@@ -324,7 +354,7 @@ class DailyPlanAvailabilityApp:
                         data.append({
                             'base': row_dict,
                             'wo_key': (str(wt).strip(), str(wn).strip()),
-                            'qty': float(qty), # 这是当日筛选出来的数量
+                            'qty': float(qty),
                             'ws': curr_ws
                         })
             except: continue
@@ -481,13 +511,15 @@ class DailyPlanAvailabilityApp:
 
     def _write_headers(self, ws, date_str):
         curr = 1
-        # 1. 写入原文件保留的列
+        # 1. 写入保留的原表头
         for idx in KEEP_COL_INDICES:
-            c = ws.cell(1, curr); c.value = self.header_names_map.get(idx,""); 
+            # 尝试从映射中获取列名，如果没有则用默认值
+            header_name = self.header_names_map.get(idx, "")
+            c = ws.cell(1, curr); c.value = header_name
             c.fill = self.header_fill; c.border = self.thin_border
             curr += 1
         
-        # 2. --- 核心修改 2: 新增日期列 (去除高亮) ---
+        # 2. 新增日期列 (普通格式)
         c_date = ws.cell(1, curr); c_date.value = date_str; 
         c_date.font = Font(bold=True); c_date.fill = self.header_fill; c_date.border = self.thin_border
         curr += 1
@@ -508,16 +540,15 @@ class DailyPlanAvailabilityApp:
         for i, (p, r) in enumerate(zip(plans, results)):
             ridx = i + 2
             curr = 1
-            # 1. 写入基础数据
+            # 1. 写入保留的基础数据
             for idx in KEEP_COL_INDICES:
                 c = ws.cell(ridx, curr); c.value = p['base'].get(idx)
                 c.font = font; c.border = self.thin_border; c.alignment = Alignment(vertical="center")
                 curr += 1
             
-            # 2. --- 核心修改 3: 写入当日排产数 (去除高亮) ---
+            # 2. 写入当日排产数
             c_daily = ws.cell(ridx, curr); c_daily.value = p['qty']
             c_daily.font = Font(bold=True); c_daily.border = self.thin_border; c_daily.alignment = center
-            # 不再使用 highlight_fill，保持默认白色背景
             curr += 1
 
             # 3. 写入分析结果
@@ -541,7 +572,6 @@ class DailyPlanAvailabilityApp:
             for c in [c_rate, c_qty, c_net, c_excess, c_msg]: c.fill = fill
             
         ws.column_dimensions['A'].width = 15
-        # 调整列宽
         ws.column_dimensions[openpyxl.utils.get_column_letter(len(KEEP_COL_INDICES)+1)].width = 12 
         ws.column_dimensions[openpyxl.utils.get_column_letter(len(KEEP_COL_INDICES)+6)].width = 50
 
