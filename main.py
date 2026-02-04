@@ -35,15 +35,14 @@ DB_CONN_STRING = (
     "UID=zhitan;PWD=Zt@forcome;TrustServerCertificate=yes;"
 )
 
-# 关键字段名
-HEADER_KEYWORD = "工单单号"
+# 基础数据从第4行开始
 ROW_IDX_DATA_START = 4   
 
 COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
 COL_NAME_WO_NO = "工单单号"
 
-# 列筛选配置: 1-20列，去除 A, I, Q, R
+# 列筛选配置: 1-20列，去除 A(1), I(9), Q(17), R(18)
 FULL_COL_RANGE = range(1, 21) 
 REMOVE_COLS = [1, 9, 17, 18]
 KEEP_COL_INDICES = [c for c in FULL_COL_RANGE if c not in REMOVE_COLS]
@@ -52,7 +51,7 @@ KEEP_COL_INDICES = [c for c in FULL_COL_RANGE if c not in REMOVE_COLS]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v10.7 (严谨整数内核版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析工具 v10.8 (v10.4读取+v10.7算法) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
         # 颜色定义
@@ -73,9 +72,6 @@ class DailyPlanAvailabilityApp:
         self.col_map_main = {}
         self.header_names_map = {}
         
-        self.header_row_idx = 2 
-        self.data_start_row = 3
-
         self._create_widgets()
 
     def _create_widgets(self):
@@ -143,19 +139,7 @@ class DailyPlanAvailabilityApp:
             except Exception as e:
                 messagebox.showerror("错误", f"无法打开文件: {e}")
 
-    def _detect_header_row(self, ws):
-        # 智能扫描前6行寻找表头
-        for r in range(1, 7):
-            row_values = []
-            for c in range(1, 50): 
-                val = ws.cell(row=r, column=c).value
-                if val: row_values.append(str(val).strip())
-            if HEADER_KEYWORD in row_values:
-                self._log(f"智能定位: 在第 {r} 行发现表头。")
-                return r
-        self._log("警告: 未能自动定位表头，默认尝试第2行。")
-        return 2
-
+    # --- 恢复 v10.4 的读取逻辑 ---
     def _on_sheet_selected(self, event):
         file_path = self.file_path.get()
         sheet_name = self.sheet_name.get()
@@ -164,15 +148,12 @@ class DailyPlanAvailabilityApp:
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
             ws = wb[sheet_name]
             
-            self.header_row_idx = self._detect_header_row(ws)
-            self.data_start_row = self.header_row_idx + 1
-
             self.col_map_main = {}
             self.header_names_map = {}
             
-            # 混合扫描表头
-            scan_rows = [self.header_row_idx]
-            if self.header_row_idx > 1: scan_rows.append(self.header_row_idx - 1)
+            # 1. 混合扫描表头 (Row 3 优先，然后 Row 2)
+            # 这样可以解决表头分两行写的情况
+            scan_rows = [3, 2]
 
             for r in scan_rows:
                 for idx, cell in enumerate(ws[r], start=1):
@@ -183,16 +164,21 @@ class DailyPlanAvailabilityApp:
                         if idx in KEEP_COL_INDICES and idx not in self.header_names_map:
                             self.header_names_map[idx] = val
 
+            # 2. 日期列扫描 (严格扫描第3行，因为您的截图显示日期在第3行)
             self.date_column_map = {}
-            for cell in ws[self.header_row_idx]: 
+            for cell in ws[3]: 
                 val = cell.value
                 dt = self._parse_excel_date(val)
                 if dt: self.date_column_map[dt] = cell.column
             
+            # 检查
+            if not self.col_map_main.get(COL_NAME_WO_NO):
+                self._log("警告: 未能在第2或3行找到'工单单号'列。")
+
             col_ws_idx = self.col_map_main.get(COL_NAME_WORKSHOP)
             workshops = set()
             if col_ws_idx:
-                for row in ws.iter_rows(min_row=self.data_start_row, min_col=col_ws_idx, max_col=col_ws_idx, values_only=True):
+                for row in ws.iter_rows(min_row=ROW_IDX_DATA_START, min_col=col_ws_idx, max_col=col_ws_idx, values_only=True):
                     if row[0]: workshops.add(str(row[0]).strip())
             
             self.workshop_combo['values'] = ["全部车间"] + sorted(list(workshops))
@@ -251,7 +237,7 @@ class DailyPlanAvailabilityApp:
         
         valid_dates = [d for d in target_dates if d in self.date_column_map]
         if not valid_dates:
-            messagebox.showwarning("无有效日期", "所选日期在Excel中未找到对应列。\n请检查表头识别日志。")
+            messagebox.showwarning("无有效日期", "所选日期在Excel第3行中未找到对应列。")
             return
 
         date_str = valid_dates[0].strftime("%Y-%m-%d")
@@ -336,14 +322,13 @@ class DailyPlanAvailabilityApp:
         if not c_no: c_no = 6     
         
         data = []
-        for row in ws.iter_rows(min_row=self.data_start_row):
+        for row in ws.iter_rows(min_row=ROW_IDX_DATA_START):
             try:
                 if col_idx > len(row): continue
                 qty = row[col_idx-1].value
                 
                 if isinstance(qty, (int, float)) and qty > 0:
-                    # --- 步骤1：输入端强制转为整数 ---
-                    # round 用于处理 27.99999 -> 28 的情况
+                    # --- v10.7 改进：强制取整，消除浮点误差 ---
                     int_qty = int(round(float(qty)))
                     
                     curr_ws = str(row[c_ws-1].value).strip() if (c_ws and row[c_ws-1].value) else "未分类"
@@ -412,13 +397,13 @@ class DailyPlanAvailabilityApp:
             except: pass
         return inv
 
+    # --- 使用 v10.7 的严谨整数逻辑 ---
     def _simulate_logic_rolling_forced(self, plans, wo_data, running_inv, running_wo_issued):
         results = []
 
         for p in plans:
             key = p['wo_key']
-            # 读取已经转为整数的排产数
-            plan_qty_int = p['qty'] 
+            plan_qty = p['qty'] # 整数
             info = wo_data.get(key)
             
             res = {
@@ -431,35 +416,26 @@ class DailyPlanAvailabilityApp:
                 res['msg'] = "无ERP信息"; res['status'] = 'error'
                 results.append(res); continue
 
-            # --- 步骤2：核实工单真实剩余能力 (基于BOM短板) ---
-            # 我们不假设工单头部的数字是准的，而是根据BOM的发料额度算
+            # 1. 确定ERP剩余能力的上限 (基于BOM短板)
             max_possible_by_erp_limit = 999999
             
             for b in info['bom']:
                 unit_use = b['req'] / info['total'] if info['total'] > 0 else 0
                 if unit_use <= 0: continue
                 
-                # 当前已发数量
                 current_issued = running_wo_issued.get((key[0], key[1], b['part']), 0)
-                
-                # 剩余可发数量
                 remain_issue_qty = max(0, b['req'] - current_issued)
                 
-                # 该物料支持做多少套成品? (向下取整)
                 possible_sets = int(remain_issue_qty // unit_use)
-                
                 if possible_sets < max_possible_by_erp_limit:
                     max_possible_by_erp_limit = possible_sets
 
-            # --- 步骤3：整数闭环计算 ---
-            # 净需求 = Min(计划, ERP剩余能力)
-            final_net_demand_int = min(plan_qty_int, max_possible_by_erp_limit)
-            
-            # 超出部分 = 计划 - 净需求 (倒推，确保相加等于计划)
-            final_excess_int = plan_qty_int - final_net_demand_int
+            # 2. 整数闭环计算
+            final_net_demand_int = min(plan_qty, max_possible_by_erp_limit)
+            final_excess_int = plan_qty - final_net_demand_int
             if final_excess_int < 0: final_excess_int = 0
             
-            # --- 步骤4：齐套率计算 ---
+            # 3. 齐套率计算
             min_material_rate = 1.0 
             min_possible_sets = 999999
             short_details = []
@@ -469,7 +445,6 @@ class DailyPlanAvailabilityApp:
                 unit_use = b['req'] / info['total'] if info['total'] > 0 else 0
                 if unit_use <= 0: continue
                 
-                # 缺料基于净需求计算
                 part_net_demand = final_net_demand_int * unit_use 
                 stock = running_inv.get(b['part'], 0)
                 
@@ -480,7 +455,6 @@ class DailyPlanAvailabilityApp:
                     if part_rate < min_material_rate:
                         min_material_rate = part_rate
                 
-                # 物理库存能支持做多少
                 can_do = int(max(0, stock) // unit_use)
                 min_possible_sets = min(min_possible_sets, can_do)
                 
@@ -488,8 +462,7 @@ class DailyPlanAvailabilityApp:
                     diff = part_net_demand - stock
                     short_details.append(f"{b['name']}({b['part']})缺{diff:g}{b['unit']}")
                 
-                # 无论是否缺料，都按计划数扣减库存 (推演逻辑)
-                full_demand = plan_qty_int * unit_use
+                full_demand = plan_qty * unit_use
                 to_deduct_full[b['part']] = full_demand
 
             achievable = min(final_net_demand_int, min_possible_sets)
@@ -521,7 +494,6 @@ class DailyPlanAvailabilityApp:
             
             results.append(res)
             
-            # 扣减库存
             for part, qty in to_deduct_full.items():
                 if part not in running_inv: running_inv[part] = 0.0
                 running_inv[part] -= qty 
