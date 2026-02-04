@@ -28,6 +28,7 @@ def get_best_sql_driver():
     return "SQL Server"
 
 CURRENT_DRIVER = get_best_sql_driver()
+# 数据库连接 (只读权限)
 DB_CONN_STRING = (
     f"DRIVER={{{CURRENT_DRIVER}}};SERVER=192.168.0.117;DATABASE=FQD;"
     "UID=zhitan;PWD=Zt@forcome;TrustServerCertificate=yes;"
@@ -47,9 +48,10 @@ KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v8.1 (强行排产推演版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析工具 v8.2 (防报错修复版) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
+        # 样式定义
         self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
         self.green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
         self.yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid") 
@@ -210,7 +212,7 @@ class DailyPlanAvailabilityApp:
             return
 
         date_str = valid_dates[0].strftime("%Y-%m-%d")
-        default_name = f"{date_str}至{valid_dates[-1].strftime('%Y-%m-%d')}强行推演.xlsx"
+        default_name = f"{date_str}至{valid_dates[-1].strftime('%Y-%m-%d')}推演分析.xlsx"
         
         save_path = filedialog.asksaveasfilename(initialfile=default_name, defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
         if not save_path: return
@@ -362,9 +364,9 @@ class DailyPlanAvailabilityApp:
 
     def _simulate_logic_rolling_forced(self, plans, wo_data, running_inv, running_wo_issued):
         """
-        v8.1 强行推演逻辑:
+        v8.2 修复版逻辑:
         1. 按照 min(ERP, Plan) 计算当天的缺料情况 (展示用)。
-        2. 按照 Plan (全量) 扣减库存 (推演用)。
+        2. 按照 Plan (全量) 扣减库存 (推演用)，并处理缺省KeyError。
         """
         results = []
 
@@ -432,14 +434,12 @@ class DailyPlanAvailabilityApp:
                     short_details.append(f"{b['name']}缺{diff:g}{b['unit']}")
                 
                 # 2. 推演用的扣减量 (基于排产全量，含Excess)
-                # 关键修正：这里假设"超出部分"也会被强行领料
                 full_demand = plan_qty * unit_use
                 to_deduct_full[b['part']] = full_demand
 
             # --- 步骤4: 汇总结果 ---
             achievable = min(int(eff_demand), min_possible_sets)
             
-            # 特殊处理：如果有效需求为0，显示已结案
             if eff_demand < 0.001:
                 res['rate'] = 1.0; res['achievable'] = 0
                 res['net_demand'] = 0; res['excess'] = int(plan_qty)
@@ -463,6 +463,10 @@ class DailyPlanAvailabilityApp:
             
             # --- 关键步骤5: 更新滚动状态 (强行扣减全量) ---
             for part, qty in to_deduct_full.items():
+                # 修复点：如果库存字典里没有这个料(KeyError)，先初始化为0，再扣减
+                if part not in running_inv:
+                    running_inv[part] = 0.0
+                
                 running_inv[part] -= qty # 扣全量
                 running_wo_issued[(key[0], key[1], part)] += qty # 假设全发了
 
@@ -496,11 +500,9 @@ class DailyPlanAvailabilityApp:
             
             c_rate = ws.cell(ridx, curr); c_rate.value = r['rate']; c_rate.number_format = '0%'
             c_qty = ws.cell(ridx, curr+1); c_qty.value = r['achievable']
-            
             c_net = ws.cell(ridx, curr+2)
             if r['status'] == 'finished': c_net.value = "-"
             else: c_net.value = r['net_demand']
-            
             c_excess = ws.cell(ridx, curr+3); c_excess.value = r['excess']
             c_msg = ws.cell(ridx, curr+4); c_msg.value = r['msg']
             c_msg.alignment = align
