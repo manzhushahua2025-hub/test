@@ -10,7 +10,7 @@ from collections import defaultdict
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from tkcalendar import DateEntry  # 需要安装: pip install tkcalendar
 
-# ============== 用户配置区 (已融合自动驱动识别) ==============
+# ============== 用户配置区 (自动适配驱动) ==============
 
 def get_best_sql_driver():
     """
@@ -43,7 +43,6 @@ def get_best_sql_driver():
 CURRENT_DRIVER = get_best_sql_driver()
 
 # 构造连接字符串
-# 注意：TrustServerCertificate=yes 用于解决新版驱动连接旧版数据库时的证书报错问题
 DB_CONN_STRING = (
     f"DRIVER={{{CURRENT_DRIVER}}};"
     "SERVER=192.168.0.117;"
@@ -53,7 +52,6 @@ DB_CONN_STRING = (
     "TrustServerCertificate=yes;"
 )
 
-# 打印日志以便调试
 print(f"系统启动: 检测到并使用数据库驱动 -> {CURRENT_DRIVER}")
 
 # 截图中的关键配置
@@ -66,9 +64,6 @@ COL_NAME_WO_TYPE = "单别"
 COL_NAME_WO_NO = "工单单号"
 
 # 设定要保留的列索引 (1-based, 对应 Excel 的 A=1, B=2...)
-# B=2, T=20
-# 保留: B(2)-H(8), J(10)-P(16), T(20)
-# 排除: I(9), Q(17), R(18), S(19) 以及 A(1)
 KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 
 
@@ -77,7 +72,7 @@ KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v5.1 (驱动: {CURRENT_DRIVER})") # 标题增加驱动显示
+        self.root.title(f"每日排程齐套分析工具 v5.2 (逻辑修正版) - 驱动: {CURRENT_DRIVER}")
         self.root.geometry("1000x700")
 
         # 样式定义
@@ -98,7 +93,7 @@ class DailyPlanAvailabilityApp:
         # 缓存数据
         self.date_column_map = {}
         self.col_map_main = {}
-        self.header_names_map = {}  # 存储保留列的表头名称 {col_idx: name}
+        self.header_names_map = {}
 
         self._create_widgets()
 
@@ -126,25 +121,20 @@ class DailyPlanAvailabilityApp:
         date_frame = ttk.Frame(filter_frame)
         date_frame.pack(side=tk.LEFT, fill=tk.X)
 
-        # 勾选框
         ttk.Checkbutton(date_frame, text="选择日期范围", variable=self.is_date_range, command=self._toggle_date_mode).pack(
             side=tk.LEFT, padx=(0, 10))
 
-        # 开始日期
         ttk.Label(date_frame, text="开始日期:").pack(side=tk.LEFT)
         self.date_start = DateEntry(date_frame, width=12, background='darkblue', foreground='white', borderwidth=2,
                                     date_pattern='yyyy/mm/dd')
         self.date_start.pack(side=tk.LEFT, padx=5)
 
-        # 结束日期 (初始可能隐藏或禁用，这里用Pack动态控制比较麻烦，直接一直显示但根据状态判断)
         self.lbl_end = ttk.Label(date_frame, text="结束日期:")
         self.date_end = DateEntry(date_frame, width=12, background='darkblue', foreground='white', borderwidth=2,
                                   date_pattern='yyyy/mm/dd')
 
-        # 初始状态更新
         self._toggle_date_mode()
 
-        # 车间选择
         ttk.Label(filter_frame, text="选择车间:").pack(side=tk.LEFT, padx=(30, 5))
         self.workshop_combo = ttk.Combobox(filter_frame, textvariable=self.selected_workshop, state="disabled",
                                            width=20)
@@ -161,13 +151,11 @@ class DailyPlanAvailabilityApp:
         self.log_text = tk.Text(main_frame, height=15, state="disabled", font=("Consolas", 9), bg="#F0F0F0")
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        # 初始日志
         self._log(f"程序已启动。当前使用数据库驱动: {CURRENT_DRIVER}")
         if CURRENT_DRIVER == "SQL Server":
             self._log("警告: 未检测到ODBC Driver 17/18，正在使用系统自带老版本驱动，可能会影响性能。")
 
     def _toggle_date_mode(self):
-        """切换日期选择模式"""
         if self.is_date_range.get():
             self.lbl_end.pack(side=tk.LEFT, padx=(10, 0))
             self.date_end.pack(side=tk.LEFT, padx=5)
@@ -206,34 +194,27 @@ class DailyPlanAvailabilityApp:
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
             ws = wb[sheet_name]
 
-            # 1. 扫描主表头 (第2行) 并记录需要保留的列名
             self.col_map_main = {}
             self.header_names_map = {}
 
-            # 遍历第2行获取所有列头
             for idx, cell in enumerate(ws[ROW_IDX_HEADER_MAIN], start=1):
                 val = str(cell.value).strip() if cell.value else ""
                 if val:
                     self.col_map_main[val] = idx
-
-                # 如果这一列在我们要保留的列表中，记录它的名字
                 if idx in KEEP_COL_INDICES:
                     self.header_names_map[idx] = val
 
-            # 检查关键列
             required_cols = [COL_NAME_WORKSHOP, COL_NAME_WO_TYPE, COL_NAME_WO_NO]
             missing = [c for c in required_cols if c not in self.col_map_main]
             if missing:
                 messagebox.showwarning("警告", f"未找到关键列: {missing}")
                 return
 
-            # 2. 扫描日期列 (第3行)
             self.date_column_map = {}
             for cell in ws[ROW_IDX_HEADER_DATE]:
                 val = cell.value
                 date_obj = self._parse_excel_date(val)
                 if date_obj:
-                    # 统一转为 datetime.date 对象作为 Key
                     self.date_column_map[date_obj] = cell.column
 
             date_keys = sorted(list(self.date_column_map.keys()))
@@ -242,7 +223,6 @@ class DailyPlanAvailabilityApp:
             else:
                 self._log(f"Excel中检测到排程日期范围: {date_keys[0]} 至 {date_keys[-1]}")
 
-            # 3. 扫描车间
             col_ws_idx = self.col_map_main[COL_NAME_WORKSHOP]
             workshops = set()
             for row in ws.iter_rows(min_row=ROW_IDX_DATA_START, min_col=col_ws_idx, max_col=col_ws_idx,
@@ -258,7 +238,6 @@ class DailyPlanAvailabilityApp:
             self._log(f"扫描失败: {e}")
 
     def _parse_excel_date(self, val):
-        """解析为 datetime.date 对象"""
         if val is None: return None
         try:
             dt = None
@@ -269,20 +248,15 @@ class DailyPlanAvailabilityApp:
             elif isinstance(val, (int, float)):
                 dt = (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(val))).date()
             elif isinstance(val, str):
-                # 尝试解析文本
                 parts = val.strip().split('/')
-                if len(parts) == 2:  # M/D 格式
-                    # 简化处理：尝试用当前年份拼凑，如果不对，建议Excel里用标准日期格式
-                    return None
-                elif len(parts) == 3:
+                if len(parts) == 3:
                     dt = datetime.datetime.strptime(val.strip(), "%Y/%m/%d").date()
             return dt
         except:
             return None
 
     def _get_target_dates(self):
-        """获取用户选择的日期列表"""
-        start_date = self.date_start.get_date()  # 返回 datetime.date
+        start_date = self.date_start.get_date()
 
         if self.is_date_range.get():
             end_date = self.date_end.get_date()
@@ -308,7 +282,6 @@ class DailyPlanAvailabilityApp:
         sheet_name = self.sheet_name.get()
         target_workshop = self.selected_workshop.get()
 
-        # 验证Excel中是否存在这些日期
         valid_dates = []
         for d in target_dates:
             if d in self.date_column_map:
@@ -320,9 +293,8 @@ class DailyPlanAvailabilityApp:
             messagebox.showwarning("无有效日期", "所选日期在Excel表头中均未找到对应列。")
             return
 
-        # 确定文件名
         if len(valid_dates) == 1:
-            date_str = valid_dates[0].strftime("%Y-%m-%d")  # 替换斜杠以免文件名非法
+            date_str = valid_dates[0].strftime("%Y-%m-%d")
             default_name = f"{date_str}缺料分析.xlsx"
         else:
             start_s = valid_dates[0].strftime("%Y-%m-%d")
@@ -339,31 +311,24 @@ class DailyPlanAvailabilityApp:
         try:
             self._log("=" * 50)
             self._log(f"开始批量分析... 共 {len(valid_dates)} 天")
-            self._log(f"使用数据库驱动: {CURRENT_DRIVER}")
 
-            # 创建新工作簿
             new_wb = openpyxl.Workbook()
-            # 删除默认Sheet
             if "Sheet" in new_wb.sheetnames:
                 del new_wb["Sheet"]
 
-            # 遍历日期处理
             for d in valid_dates:
-                sheet_title = d.strftime("%Y-%m-%d")  # 使用日期作为Sheet名
+                sheet_title = d.strftime("%Y-%m-%d")
                 self._log(f"正在处理: {sheet_title}")
 
-                # 1. 提取基础数据
                 col_idx = self.date_column_map[d]
                 plans_data = self._extract_data_for_date(file_path, sheet_name, col_idx, target_workshop)
 
                 if not plans_data:
                     self._log(f"  -> {sheet_title} 无排产数据")
-                    # 即使没数据也创建一个空Sheet
                     new_ws = new_wb.create_sheet(title=sheet_title)
                     self._write_headers(new_ws)
                     continue
 
-                # 2. ERP 查询与计算
                 wo_keys = list(set(p['wo_key'] for p in plans_data))
                 self._log(f"  -> 查询 {len(wo_keys)} 个工单的BOM...")
                 wo_details = self._fetch_erp_data(wo_keys)
@@ -375,10 +340,8 @@ class DailyPlanAvailabilityApp:
                 self._log(f"  -> 查询 {len(all_parts)} 种物料的库存...")
                 inventory = self._fetch_inventory(list(all_parts))
 
-                # 3. 计算逻辑
                 results = self._simulate(plans_data, wo_details, inventory)
 
-                # 4. 写入新Sheet
                 new_ws = new_wb.create_sheet(title=sheet_title)
                 self._write_new_sheet(new_ws, plans_data, results)
                 self._log(f"  -> {sheet_title} 处理完成")
@@ -393,11 +356,6 @@ class DailyPlanAvailabilityApp:
             messagebox.showerror("运行错误", str(e))
 
     def _extract_data_for_date(self, file_path, sheet_name, date_col_idx, filter_ws):
-        """
-        读取原文件，提取指定列的数据。
-        注意：这里无论是否筛选，iter_rows默认读取所有行。
-        这符合'另存一份原文件去除筛选'的逻辑效果（直接读取底层数据）。
-        """
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         ws = wb[sheet_name]
 
@@ -409,19 +367,16 @@ class DailyPlanAvailabilityApp:
 
         for row in ws.iter_rows(min_row=ROW_IDX_DATA_START):
             try:
-                # 检查日期列是否有排产
                 if date_col_idx > len(row): continue
-                daily_qty = row[date_col_idx - 1].value  # 0-based tuple
+                daily_qty = row[date_col_idx - 1].value
 
                 if isinstance(daily_qty, (int, float)) and daily_qty > 0:
-                    # 检查车间
                     curr_ws = row[c_ws - 1].value
                     curr_ws = str(curr_ws).strip() if curr_ws else "未分类"
 
                     if filter_ws != "全部车间" and curr_ws != filter_ws:
                         continue
 
-                    # 读取该行的基础信息（保留列）
                     row_data = {}
                     for target_col_idx in KEEP_COL_INDICES:
                         if target_col_idx <= len(row):
@@ -430,13 +385,12 @@ class DailyPlanAvailabilityApp:
                         else:
                             row_data[target_col_idx] = None
 
-                    # 关键Key
                     wo_type = row[c_type - 1].value
                     wo_no = row[c_no - 1].value
 
                     if wo_type and wo_no:
                         extracted_rows.append({
-                            'base_data': row_data,  # 字典 {col_idx: value}
+                            'base_data': row_data,
                             'wo_key': (str(wo_type).strip(), str(wo_no).strip()),
                             'daily_qty': float(daily_qty),
                             'workshop': curr_ws
@@ -446,7 +400,6 @@ class DailyPlanAvailabilityApp:
         return extracted_rows
 
     def _fetch_erp_data(self, wo_keys):
-        # ... (保持原有逻辑不变)
         if not wo_keys: return {}
         conditions = []
         for t, n in wo_keys:
@@ -454,7 +407,6 @@ class DailyPlanAvailabilityApp:
 
         if not conditions: return {}
 
-        # 分批处理防止SQL过长 (简单分批，每批200个)
         batch_size = 200
         all_data = defaultdict(lambda: {'total': 0, 'bom': []})
 
@@ -462,11 +414,14 @@ class DailyPlanAvailabilityApp:
             batch_conds = conditions[i:i + batch_size]
             where_sql = " OR ".join(batch_conds)
 
+            # 修改点：查询增加 MB.MB004 作为 unit
             sql = f"""
                 SELECT 
                     RTRIM(TA.TA001) as ta001, RTRIM(TA.TA002) as ta002, 
                     TA.TA015 as wo_total_qty,
-                    RTRIM(TB.TB003) as part_no, ISNULL(RTRIM(MB.MB002),'') as part_name,
+                    RTRIM(TB.TB003) as part_no, 
+                    ISNULL(RTRIM(MB.MB002),'') as part_name,
+                    ISNULL(RTRIM(MB.MB004),'') as unit, 
                     TB.TB004 as req_qty, TB.TB005 as iss_qty
                 FROM MOCTA TA
                 INNER JOIN MOCTB TB ON TA.TA001 = TB.TB001 AND TA.TA002 = TB.TB002
@@ -482,6 +437,7 @@ class DailyPlanAvailabilityApp:
                         all_data[k]['bom'].append({
                             'part': row['part_no'],
                             'name': row['part_name'],
+                            'unit': row['unit'],  # 存储单位
                             'req': float(row['req_qty']),
                             'iss': float(row['iss_qty'])
                         })
@@ -491,10 +447,7 @@ class DailyPlanAvailabilityApp:
         return all_data
 
     def _fetch_inventory(self, parts):
-        # ... (保持原有逻辑不变)
         if not parts: return {}
-        # 简单处理，如果parts太多可能报错
-        # 同样建议分批
         unique_parts = list(set(parts))
         inventory = {}
         batch_size = 500
@@ -513,8 +466,8 @@ class DailyPlanAvailabilityApp:
 
     def _simulate(self, plans_data, wo_data, inventory):
         """
-        计算逻辑保持不变
-        Returns: list of dicts with result info appended
+        齐套率逻辑修改：取所有物料中齐套率的最小值。
+        缺料信息修改：换行显示，并增加单位。
         """
         running_inv = inventory.copy()
         calculated_results = []
@@ -540,48 +493,64 @@ class DailyPlanAvailabilityApp:
 
             wo_total_qty = info['total']
 
-            items_needed = 0
-            items_kitted = 0
-            shortage_details = []
+            # --- 新逻辑开始 ---
+            min_kitting_rate = 1.0  # 默认为100%，逐个物料比较取最小
+            min_possible_sets = 9999999
+            
+            shortage_details_list = []
             to_deduct = {}
             is_fully_kitted = True
-            min_possible_sets = 9999999
+
+            has_requirement = False # 标记该工单是否真的有物料需求
 
             for bom in info['bom']:
                 part = bom['part']
                 remain_issue = max(0, bom['req'] - bom['iss'])
                 unit_usage = bom['req'] / wo_total_qty if wo_total_qty > 0 else 0
                 theo_demand = daily_qty * unit_usage
+                
+                # 净需求
                 net_demand = min(remain_issue, theo_demand)
 
                 if net_demand <= 0.0001: continue
-
-                items_needed += 1
+                
+                has_requirement = True
                 to_deduct[part] = net_demand
                 current_stock = running_inv.get(part, 0)
 
+                # 1. 计算该物料的单独齐套率 (库存 / 净需求)
+                item_rate = current_stock / net_demand if net_demand > 0 else 1.0
+                if item_rate > 1.0: item_rate = 1.0 # 单个物料齐套率最高100%
+                min_kitting_rate = min(min_kitting_rate, item_rate)
+
+                # 2. 计算可产数量 (木桶效应)
                 can_make = int(current_stock // unit_usage) if unit_usage > 0 else 999999
                 min_possible_sets = min(min_possible_sets, can_make)
 
-                if current_stock >= net_demand - 0.0001:  # 浮点容差
-                    items_kitted += 1
-                else:
+                # 3. 记录缺料
+                if current_stock < net_demand - 0.0001:
                     is_fully_kitted = False
                     short_qty = net_demand - current_stock
-                    shortage_details.append(f"{part} {bom['name']}(缺{short_qty:.1f})")
+                    # 格式化：换行，增加单位。使用 :g 去除不必要的 .0
+                    unit_str = bom['unit']
+                    shortage_details_list.append(f"{part} {bom['name']}(缺{short_qty:g}{unit_str})")
 
+            # 修正可产数量
             actual_possible_sets = min(int(daily_qty), min_possible_sets)
-            if items_needed == 0:
+            
+            # 如果没有物料需求（不需要领料），则视为齐套
+            if not has_requirement:
                 actual_possible_sets = int(daily_qty)
                 is_fully_kitted = True
+                min_kitting_rate = 1.0
 
-            rate = (items_kitted / items_needed) if items_needed > 0 else 1.0
-
-            res_item['rate'] = rate
+            res_item['rate'] = min_kitting_rate
             res_item['achievable'] = actual_possible_sets
             res_item['is_short'] = not is_fully_kitted
-            if shortage_details:
-                res_item['shortage_str'] = ",".join(shortage_details)
+            
+            if shortage_details_list:
+                # 使用换行符连接
+                res_item['shortage_str'] = "\n".join(shortage_details_list)
 
             calculated_results.append(res_item)
 
@@ -593,8 +562,6 @@ class DailyPlanAvailabilityApp:
         return calculated_results
 
     def _write_headers(self, ws):
-        """写入新表头"""
-        # 写入原有保留列的表头
         current_col = 1
         for idx in KEEP_COL_INDICES:
             cell = ws.cell(row=1, column=current_col)
@@ -603,7 +570,6 @@ class DailyPlanAvailabilityApp:
             cell.border = self.thin_border
             current_col += 1
 
-        # 写入新列
         new_headers = ["齐套率", "可产数量", "缺料信息"]
         for h in new_headers:
             cell = ws.cell(row=1, column=current_col)
@@ -616,14 +582,15 @@ class DailyPlanAvailabilityApp:
     def _write_new_sheet(self, ws, plans_data, results):
         self._write_headers(ws)
 
-        # 样式
         font_normal = Font(name="微软雅黑", size=9)
-        align = Alignment(vertical="center", wrap_text=False)
+        # 允许换行
+        align_wrap = Alignment(vertical="center", wrap_text=True)
+        align_center = Alignment(vertical="center", horizontal="center", wrap_text=False)
 
         for i, (plan, res) in enumerate(zip(plans_data, results)):
             row_idx = i + 2
 
-            # 1. 写入基础列 (保留的 B-T)
+            # 1. 基础列
             current_col = 1
             for col_idx in KEEP_COL_INDICES:
                 cell = ws.cell(row=row_idx, column=current_col)
@@ -631,27 +598,31 @@ class DailyPlanAvailabilityApp:
                 cell.value = val
                 cell.font = font_normal
                 cell.border = self.thin_border
+                cell.alignment = Alignment(vertical="center")
                 current_col += 1
 
-            # 2. 写入计算结果列
+            # 2. 计算结果
             # 齐套率
             c_rate = ws.cell(row=row_idx, column=current_col)
             c_rate.value = res['rate']
             c_rate.number_format = '0%'
             c_rate.border = self.thin_border
+            c_rate.alignment = align_center
 
             # 可产数量
             c_qty = ws.cell(row=row_idx, column=current_col + 1)
             c_qty.value = res['achievable']
             c_qty.border = self.thin_border
+            c_qty.alignment = align_center
 
-            # 缺料信息
+            # 缺料信息 (设置自动换行)
             c_info = ws.cell(row=row_idx, column=current_col + 2)
             c_info.value = res['shortage_str']
-            c_info.alignment = Alignment(wrap_text=True, vertical="center")  # 缺料信息自动换行
+            c_info.alignment = align_wrap 
             c_info.border = self.thin_border
+            c_info.font = font_normal
 
-            # 3. 颜色标记 (整行标红或标绿)
+            # 3. 颜色标记
             fill = self.red_fill if res['is_short'] else self.green_fill
             c_rate.fill = fill
             c_qty.fill = fill
@@ -659,7 +630,8 @@ class DailyPlanAvailabilityApp:
 
         # 设置列宽
         ws.column_dimensions['A'].width = 15
-        ws.column_dimensions[openpyxl.utils.get_column_letter(len(KEEP_COL_INDICES) + 3)].width = 50
+        # 最后一列缺料信息加宽，适应长文本
+        ws.column_dimensions[openpyxl.utils.get_column_letter(len(KEEP_COL_INDICES) + 3)].width = 60
 
 
 if __name__ == "__main__":
