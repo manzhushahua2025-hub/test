@@ -34,9 +34,10 @@ DB_CONN_STRING = (
     "UID=zhitan;PWD=Zt@forcome;TrustServerCertificate=yes;"
 )
 
-ROW_IDX_HEADER_MAIN = 2  
-ROW_IDX_HEADER_DATE = 3  
-ROW_IDX_DATA_START = 4   
+# --- 关键修正：根据您的截图，表头在第3行 ---
+ROW_IDX_HEADER_MAIN = 3
+ROW_IDX_HEADER_DATE = 3
+ROW_IDX_DATA_START = 4
 
 COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
@@ -49,7 +50,7 @@ KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v8.6 (缺料显示优化版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析工具 v8.7 (排产量显示修复版) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
         # 颜色定义
@@ -302,7 +303,7 @@ class DailyPlanAvailabilityApp:
                     
                     row_dict = {}
                     for ti in KEEP_COL_INDICES:
-                        # 强制替换 O列(第15列) 的值为当日排产数
+                        # --- 关键修改：强制用当日排产数 qty 替换第15列(O列) ---
                         if ti == 15:
                             row_dict[ti] = float(qty)
                         else:
@@ -427,7 +428,6 @@ class DailyPlanAvailabilityApp:
                 
                 if stock < part_net_demand - 0.0001:
                     diff = part_net_demand - stock
-                    # --- 修正点 v8.6: 格式化为 品名(品号)缺数量单位 ---
                     short_details.append(f"{b['name']}({b['part']})缺{diff:g}{b['unit']}")
                 
                 full_demand = plan_qty * unit_use
@@ -435,9 +435,7 @@ class DailyPlanAvailabilityApp:
 
             achievable = min(int(eff_demand), min_possible_sets)
             
-            # ----------------- 状态与文字定义修正区 -----------------
-            
-            # 灰色：工单物料已领完/工单完结
+            # 状态判定
             if eff_demand < 0.001:
                 res['rate'] = 1.0; res['achievable'] = 0
                 res['net_demand'] = 0; res['excess'] = int(plan_qty)
@@ -451,25 +449,20 @@ class DailyPlanAvailabilityApp:
                 fully_kitted = (min_material_rate >= 0.999)
                 
                 if not fully_kitted:
-                    # 红色：缺料
                     res['status'] = 'short'
                     msgs = []
                     if short_details: msgs.append("\n".join(short_details))
                     res['msg'] = "\n".join(msgs)
-                
                 elif excess_qty > 0:
-                    # 黄色：此工单完结，排产超出工单数量
                     res['status'] = 'warn'
                     res['msg'] = "此工单完结，排产超出工单数量"
-                
                 else:
-                    # 绿色：齐套
                     res['status'] = 'ok'
                     res['msg'] = "齐套"
             
             results.append(res)
             
-            # 扣减库存 (强行推演)
+            # 扣减库存
             for part, qty in to_deduct_full.items():
                 if part not in running_inv: running_inv[part] = 0.0
                 running_inv[part] -= qty 
