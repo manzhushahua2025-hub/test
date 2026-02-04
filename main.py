@@ -10,19 +10,56 @@ from collections import defaultdict
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from tkcalendar import DateEntry  # 需要安装: pip install tkcalendar
 
-# ============== 用户配置区 ==============
+# ============== 用户配置区 (已融合自动驱动识别) ==============
+
+def get_best_sql_driver():
+    """
+    自动检测当前电脑安装了哪个 SQL Server 驱动。
+    优先级：ODBC 18 > 17 > 13 > Native Client > 系统自带 SQL Server
+    """
+    try:
+        installed_drivers = [d for d in pyodbc.drivers()]
+    except Exception:
+        return "SQL Server" # 如果获取失败，返回保底驱动
+    
+    # 驱动优先级列表 (越靠前越好)
+    driver_preference = [
+        "ODBC Driver 18 for SQL Server",   # 最新版
+        "ODBC Driver 17 for SQL Server",   # 主流版
+        "ODBC Driver 13 for SQL Server",   # 旧版
+        "SQL Server Native Client 11.0",   # SQL 2012 时代
+        "SQL Server Native Client 10.0",   # SQL 2008 时代
+        "SQL Server"                       # Windows XP/7/10/11 自带通用驱动 (保底)
+    ]
+
+    for drv in driver_preference:
+        if drv in installed_drivers:
+            return drv
+    
+    # 如果一个都没找到，返回默认值尝试
+    return "SQL Server"
+
+# 动态获取当前电脑的最佳驱动
+CURRENT_DRIVER = get_best_sql_driver()
+
+# 构造连接字符串
+# 注意：TrustServerCertificate=yes 用于解决新版驱动连接旧版数据库时的证书报错问题
 DB_CONN_STRING = (
-    "DRIVER={ODBC Driver 17 for SQL Server};"
+    f"DRIVER={{{CURRENT_DRIVER}}};"
     "SERVER=192.168.0.117;"
     "DATABASE=FQD;"
     "UID=zhitan;"
     "PWD=Zt@forcome;"
+    "TrustServerCertificate=yes;"
 )
+
+# 打印日志以便调试
+print(f"系统启动: 检测到并使用数据库驱动 -> {CURRENT_DRIVER}")
 
 # 截图中的关键配置
 ROW_IDX_HEADER_MAIN = 2  # 主表头所在行
 ROW_IDX_HEADER_DATE = 3  # 日期表头所在行
-ROW_IDX_DATA_START = 4  # 数据起始行
+ROW_IDX_DATA_START = 4   # 数据起始行
 
 COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
@@ -40,7 +77,7 @@ KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("每日排程齐套分析工具 v5.0 (新文件生成版)")
+        self.root.title(f"每日排程齐套分析工具 v5.1 (驱动: {CURRENT_DRIVER})") # 标题增加驱动显示
         self.root.geometry("1000x700")
 
         # 样式定义
@@ -123,6 +160,11 @@ class DailyPlanAvailabilityApp:
         # 4. 日志
         self.log_text = tk.Text(main_frame, height=15, state="disabled", font=("Consolas", 9), bg="#F0F0F0")
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # 初始日志
+        self._log(f"程序已启动。当前使用数据库驱动: {CURRENT_DRIVER}")
+        if CURRENT_DRIVER == "SQL Server":
+            self._log("警告: 未检测到ODBC Driver 17/18，正在使用系统自带老版本驱动，可能会影响性能。")
 
     def _toggle_date_mode(self):
         """切换日期选择模式"""
@@ -229,12 +271,8 @@ class DailyPlanAvailabilityApp:
             elif isinstance(val, str):
                 # 尝试解析文本
                 parts = val.strip().split('/')
-                if len(parts) == 2:  # M/D 格式，假设为当前年或2026(根据截图)
-                    # 这里为了匹配截图中的年份，如果解析不到年份，需要结合上下文。
+                if len(parts) == 2:  # M/D 格式
                     # 简化处理：尝试用当前年份拼凑，如果不对，建议Excel里用标准日期格式
-                    now_year = datetime.datetime.now().year
-                    # 截图里是2026年，这里也可以硬编码尝试解析，或者就依靠Excel本身如果是日期格式最好
-                    # 暂且返回None让用户去检查Excel格式，或者尝试解析
                     return None
                 elif len(parts) == 3:
                     dt = datetime.datetime.strptime(val.strip(), "%Y/%m/%d").date()
@@ -301,6 +339,7 @@ class DailyPlanAvailabilityApp:
         try:
             self._log("=" * 50)
             self._log(f"开始批量分析... 共 {len(valid_dates)} 天")
+            self._log(f"使用数据库驱动: {CURRENT_DRIVER}")
 
             # 创建新工作簿
             new_wb = openpyxl.Workbook()
@@ -326,12 +365,14 @@ class DailyPlanAvailabilityApp:
 
                 # 2. ERP 查询与计算
                 wo_keys = list(set(p['wo_key'] for p in plans_data))
+                self._log(f"  -> 查询 {len(wo_keys)} 个工单的BOM...")
                 wo_details = self._fetch_erp_data(wo_keys)
 
                 all_parts = set()
                 for w in wo_details.values():
                     for b in w['bom']: all_parts.add(b['part'])
 
+                self._log(f"  -> 查询 {len(all_parts)} 种物料的库存...")
                 inventory = self._fetch_inventory(list(all_parts))
 
                 # 3. 计算逻辑
@@ -612,15 +653,12 @@ class DailyPlanAvailabilityApp:
 
             # 3. 颜色标记 (整行标红或标绿)
             fill = self.red_fill if res['is_short'] else self.green_fill
-            # 给新增加的3列上色，或者全行上色？
-            # 需求通常是高亮显示状态。这里给后三列上色。
             c_rate.fill = fill
             c_qty.fill = fill
             c_info.fill = fill
 
         # 设置列宽
-        ws.column_dimensions['A'].width = 15  # 假设A列是日期或单号
-        # 最后一列缺料信息宽一点
+        ws.column_dimensions['A'].width = 15
         ws.column_dimensions[openpyxl.utils.get_column_letter(len(KEEP_COL_INDICES) + 3)].width = 50
 
 
@@ -631,5 +669,4 @@ if __name__ == "__main__":
         root.mainloop()
     except Exception as e:
         import tkinter.messagebox
-
         tkinter.messagebox.showerror("启动失败", str(e))
