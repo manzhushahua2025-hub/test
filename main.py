@@ -34,7 +34,7 @@ DB_CONN_STRING = (
     "UID=zhitan;PWD=Zt@forcome;TrustServerCertificate=yes;"
 )
 
-# --- 关键修正 1: 根据截图，表头位于第3行 ---
+# --- 关键修正：根据您的截图，表头位于第3行 ---
 ROW_IDX_HEADER_MAIN = 3  
 ROW_IDX_HEADER_DATE = 3  
 ROW_IDX_DATA_START = 4   
@@ -50,7 +50,7 @@ KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v9.0 (表头与排产量终极修正版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析工具 v10.0 (精准排产量替换版) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
         # 颜色定义
@@ -236,6 +236,7 @@ class DailyPlanAvailabilityApp:
             
             for d in valid_dates:
                 col_idx = self.date_column_map[d]
+                # 传入 col_idx 以便 extract_data 知道去哪一列抓当日计划数
                 plans = self._extract_data(file_path, sheet_name, col_idx, target_workshop)
                 all_plans_by_date[d] = plans
                 for p in plans:
@@ -288,7 +289,7 @@ class DailyPlanAvailabilityApp:
             messagebox.showerror("运行错误", str(e))
 
     def _extract_data(self, file_path, sheet_name, col_idx, filter_ws):
-        # 即使文件被筛选过，read_only=True 也会遍历所有物理行
+        # read_only=True 模式会读取文件的底层数据，天然无视 Excel 的筛选状态
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         ws = wb[sheet_name]
         c_ws = self.col_map_main.get(COL_NAME_WORKSHOP)
@@ -298,7 +299,10 @@ class DailyPlanAvailabilityApp:
         data = []
         for row in ws.iter_rows(min_row=ROW_IDX_DATA_START):
             try:
+                # 安全检查：防止列索引越界
                 if col_idx > len(row): continue
+                
+                # 读取当日排产数 (即日期对应的那一列)
                 qty = row[col_idx-1].value
                 
                 if isinstance(qty, (int, float)) and qty > 0:
@@ -307,10 +311,11 @@ class DailyPlanAvailabilityApp:
                     
                     row_dict = {}
                     for ti in KEEP_COL_INDICES:
-                        # --- 关键修改 2: 强制将导出的“排产数量”列(O列)替换为当日排产数 qty ---
+                        # --- 核心修改：强制将导出的“排产数量”列(第15列, O列) 替换为当日排产数 ---
                         if ti == 15:
-                            row_dict[ti] = float(qty)
+                            row_dict[ti] = float(qty) # 用当日数覆盖总数
                         else:
+                            # 其他列保持原样
                             row_dict[ti] = row[ti-1].value if ti <= len(row) else None
                     
                     wt = row[c_type-1].value
