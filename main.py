@@ -7,6 +7,7 @@ import pyodbc
 import traceback
 import datetime
 import copy
+import math
 from collections import defaultdict
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from tkcalendar import DateEntry  
@@ -34,17 +35,15 @@ DB_CONN_STRING = (
     "UID=zhitan;PWD=Zt@forcome;TrustServerCertificate=yes;"
 )
 
-# 关键设置：基础数据从第4行开始
+# 关键字段名
+HEADER_KEYWORD = "工单单号"
 ROW_IDX_DATA_START = 4   
 
 COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
 COL_NAME_WO_NO = "工单单号"
 
-# --- 核心修改：列筛选配置 ---
-# 范围：1到20列 (A-T)
-# 去除：1(A), 9(I), 17(Q), 18(R)
-# 保留：其余列
+# 列筛选配置: 1-20列，去除 A, I, Q, R
 FULL_COL_RANGE = range(1, 21) 
 REMOVE_COLS = [1, 9, 17, 18]
 KEEP_COL_INDICES = [c for c in FULL_COL_RANGE if c not in REMOVE_COLS]
@@ -53,7 +52,7 @@ KEEP_COL_INDICES = [c for c in FULL_COL_RANGE if c not in REMOVE_COLS]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v10.4 (混合表头适配版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析工具 v10.7 (严谨整数内核版) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
         # 颜色定义
@@ -73,6 +72,10 @@ class DailyPlanAvailabilityApp:
         self.date_column_map = {}
         self.col_map_main = {}
         self.header_names_map = {}
+        
+        self.header_row_idx = 2 
+        self.data_start_row = 3
+
         self._create_widgets()
 
     def _create_widgets(self):
@@ -130,7 +133,6 @@ class DailyPlanAvailabilityApp:
         if path:
             self.file_path.set(path)
             try:
-                # read_only=True 模式下，openpyxl 会读取所有行，无视筛选隐藏
                 wb = openpyxl.load_workbook(path, read_only=True)
                 self.sheet_combo['values'] = wb.sheetnames
                 if wb.sheetnames:
@@ -141,6 +143,19 @@ class DailyPlanAvailabilityApp:
             except Exception as e:
                 messagebox.showerror("错误", f"无法打开文件: {e}")
 
+    def _detect_header_row(self, ws):
+        # 智能扫描前6行寻找表头
+        for r in range(1, 7):
+            row_values = []
+            for c in range(1, 50): 
+                val = ws.cell(row=r, column=c).value
+                if val: row_values.append(str(val).strip())
+            if HEADER_KEYWORD in row_values:
+                self._log(f"智能定位: 在第 {r} 行发现表头。")
+                return r
+        self._log("警告: 未能自动定位表头，默认尝试第2行。")
+        return 2
+
     def _on_sheet_selected(self, event):
         file_path = self.file_path.get()
         sheet_name = self.sheet_name.get()
@@ -149,48 +164,42 @@ class DailyPlanAvailabilityApp:
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
             ws = wb[sheet_name]
             
-            # --- 1. 混合扫描表头 (Row 2 和 Row 3) ---
-            # 解决表头在不同行的问题
+            self.header_row_idx = self._detect_header_row(ws)
+            self.data_start_row = self.header_row_idx + 1
+
             self.col_map_main = {}
             self.header_names_map = {}
             
-            # 先扫第3行(优先)，再扫第2行
-            for r in [3, 2]:
+            # 混合扫描表头
+            scan_rows = [self.header_row_idx]
+            if self.header_row_idx > 1: scan_rows.append(self.header_row_idx - 1)
+
+            for r in scan_rows:
                 for idx, cell in enumerate(ws[r], start=1):
                     val = str(cell.value).strip() if cell.value else ""
                     if val:
-                        # 记录列名对应的索引
                         if val not in self.col_map_main: 
                             self.col_map_main[val] = idx
-                        # 如果这一列在我们保留的列表中，记录其名称作为新表头
                         if idx in KEEP_COL_INDICES and idx not in self.header_names_map:
                             self.header_names_map[idx] = val
 
-            # --- 2. 日期列扫描 (严格扫描第3行) ---
             self.date_column_map = {}
-            for cell in ws[3]: # 假设日期只在第3行
+            for cell in ws[self.header_row_idx]: 
                 val = cell.value
                 dt = self._parse_excel_date(val)
                 if dt: self.date_column_map[dt] = cell.column
             
-            # 检查关键列是否找到
-            if not self.col_map_main.get(COL_NAME_WO_NO):
-                self._log("警告: 未找到'工单单号'列，请检查表头是否在第2或3行。")
-
             col_ws_idx = self.col_map_main.get(COL_NAME_WORKSHOP)
             workshops = set()
             if col_ws_idx:
-                for row in ws.iter_rows(min_row=ROW_IDX_DATA_START, min_col=col_ws_idx, max_col=col_ws_idx, values_only=True):
+                for row in ws.iter_rows(min_row=self.data_start_row, min_col=col_ws_idx, max_col=col_ws_idx, values_only=True):
                     if row[0]: workshops.add(str(row[0]).strip())
             
             self.workshop_combo['values'] = ["全部车间"] + sorted(list(workshops))
             self.workshop_combo.current(0)
             self.workshop_combo.config(state="readonly")
             
-            # 日志反馈
-            date_cnt = len(self.date_column_map)
-            self._log(f"分析完成: 找到 {date_cnt} 个日期列。")
-            
+            self._log(f"分析完成: 找到 {len(self.date_column_map)} 个日期列。")
             wb.close()
         except Exception as e:
             traceback.print_exc()
@@ -242,7 +251,7 @@ class DailyPlanAvailabilityApp:
         
         valid_dates = [d for d in target_dates if d in self.date_column_map]
         if not valid_dates:
-            messagebox.showwarning("无有效日期", "所选日期在Excel第3行中均未找到对应列。")
+            messagebox.showwarning("无有效日期", "所选日期在Excel中未找到对应列。\n请检查表头识别日志。")
             return
 
         date_str = valid_dates[0].strftime("%Y-%m-%d")
@@ -264,14 +273,13 @@ class DailyPlanAvailabilityApp:
             
             for d in valid_dates:
                 col_idx = self.date_column_map[d]
-                # 读取数据
                 plans = self._extract_data(file_path, sheet_name, col_idx, target_workshop)
                 all_plans_by_date[d] = plans
                 for p in plans:
                     all_wo_keys.add(p['wo_key'])
             
             if not all_wo_keys:
-                messagebox.showinfo("无数据", "所选日期范围内没有排产计划(数量>0)。\n请确认Excel第3行的日期列与下方数据是否对齐。")
+                messagebox.showinfo("无数据", "所选日期范围内没有排产计划(数量>0)。\n请确认Excel日期列与下方数据是否对齐。")
                 return
 
             self._log("正在查询ERP BOM和库存...")
@@ -320,28 +328,28 @@ class DailyPlanAvailabilityApp:
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         ws = wb[sheet_name]
         
-        # 使用动态扫描到的列索引
         c_ws = self.col_map_main.get(COL_NAME_WORKSHOP)
         c_type = self.col_map_main.get(COL_NAME_WO_TYPE)
         c_no = self.col_map_main.get(COL_NAME_WO_NO)
         
-        # 如果关键列没找到，尝试默认值（兼容旧模板）
-        if not c_type: c_type = 5 # E列
-        if not c_no: c_no = 6     # F列
+        if not c_type: c_type = 5 
+        if not c_no: c_no = 6     
         
         data = []
-        for row in ws.iter_rows(min_row=ROW_IDX_DATA_START):
+        for row in ws.iter_rows(min_row=self.data_start_row):
             try:
                 if col_idx > len(row): continue
-                # 读取当日计划数
                 qty = row[col_idx-1].value
                 
                 if isinstance(qty, (int, float)) and qty > 0:
+                    # --- 步骤1：输入端强制转为整数 ---
+                    # round 用于处理 27.99999 -> 28 的情况
+                    int_qty = int(round(float(qty)))
+                    
                     curr_ws = str(row[c_ws-1].value).strip() if (c_ws and row[c_ws-1].value) else "未分类"
                     if filter_ws != "全部车间" and curr_ws != filter_ws: continue
                     
                     row_dict = {}
-                    # 复制基础列
                     for ti in KEEP_COL_INDICES:
                         if ti <= len(row):
                             row_dict[ti] = row[ti-1].value
@@ -354,7 +362,7 @@ class DailyPlanAvailabilityApp:
                         data.append({
                             'base': row_dict,
                             'wo_key': (str(wt).strip(), str(wn).strip()),
-                            'qty': float(qty),
+                            'qty': int_qty, 
                             'ws': curr_ws
                         })
             except: continue
@@ -409,7 +417,8 @@ class DailyPlanAvailabilityApp:
 
         for p in plans:
             key = p['wo_key']
-            plan_qty = p['qty']
+            # 读取已经转为整数的排产数
+            plan_qty_int = p['qty'] 
             info = wo_data.get(key)
             
             res = {
@@ -422,37 +431,46 @@ class DailyPlanAvailabilityApp:
                 res['msg'] = "无ERP信息"; res['status'] = 'error'
                 results.append(res); continue
 
-            # 1. 工单净需求
-            eff_demand = plan_qty 
+            # --- 步骤2：核实工单真实剩余能力 (基于BOM短板) ---
+            # 我们不假设工单头部的数字是准的，而是根据BOM的发料额度算
+            max_possible_by_erp_limit = 999999
+            
             for b in info['bom']:
                 unit_use = b['req'] / info['total'] if info['total'] > 0 else 0
                 if unit_use <= 0: continue
+                
+                # 当前已发数量
                 current_issued = running_wo_issued.get((key[0], key[1], b['part']), 0)
-                theo_need = plan_qty * unit_use
-                remain_issue = max(0, b['req'] - current_issued)
-                if remain_issue < theo_need - 0.0001:
-                    max_sets = remain_issue / unit_use
-                    if max_sets < eff_demand:
-                        eff_demand = max_sets
+                
+                # 剩余可发数量
+                remain_issue_qty = max(0, b['req'] - current_issued)
+                
+                # 该物料支持做多少套成品? (向下取整)
+                possible_sets = int(remain_issue_qty // unit_use)
+                
+                if possible_sets < max_possible_by_erp_limit:
+                    max_possible_by_erp_limit = possible_sets
+
+            # --- 步骤3：整数闭环计算 ---
+            # 净需求 = Min(计划, ERP剩余能力)
+            final_net_demand_int = min(plan_qty_int, max_possible_by_erp_limit)
             
-            # 2. 超出部分
-            excess_qty = 0
-            if eff_demand < plan_qty:
-                excess_qty = plan_qty - eff_demand
-                if excess_qty < 0.0001: excess_qty = 0
+            # 超出部分 = 计划 - 净需求 (倒推，确保相加等于计划)
+            final_excess_int = plan_qty_int - final_net_demand_int
+            if final_excess_int < 0: final_excess_int = 0
             
-            # 3. 齐套率/缺料
+            # --- 步骤4：齐套率计算 ---
             min_material_rate = 1.0 
             min_possible_sets = 999999
             short_details = []
-            
             to_deduct_full = {} 
 
             for b in info['bom']:
                 unit_use = b['req'] / info['total'] if info['total'] > 0 else 0
                 if unit_use <= 0: continue
                 
-                part_net_demand = eff_demand * unit_use
+                # 缺料基于净需求计算
+                part_net_demand = final_net_demand_int * unit_use 
                 stock = running_inv.get(b['part'], 0)
                 
                 if part_net_demand > 0:
@@ -462,6 +480,7 @@ class DailyPlanAvailabilityApp:
                     if part_rate < min_material_rate:
                         min_material_rate = part_rate
                 
+                # 物理库存能支持做多少
                 can_do = int(max(0, stock) // unit_use)
                 min_possible_sets = min(min_possible_sets, can_do)
                 
@@ -469,21 +488,22 @@ class DailyPlanAvailabilityApp:
                     diff = part_net_demand - stock
                     short_details.append(f"{b['name']}({b['part']})缺{diff:g}{b['unit']}")
                 
-                full_demand = plan_qty * unit_use
+                # 无论是否缺料，都按计划数扣减库存 (推演逻辑)
+                full_demand = plan_qty_int * unit_use
                 to_deduct_full[b['part']] = full_demand
 
-            achievable = min(int(eff_demand), min_possible_sets)
+            achievable = min(final_net_demand_int, min_possible_sets)
             
             # 状态判定
-            if eff_demand < 0.001:
+            if final_net_demand_int == 0 and final_excess_int > 0:
                 res['rate'] = 1.0; res['achievable'] = 0
-                res['net_demand'] = 0; res['excess'] = int(plan_qty)
+                res['net_demand'] = 0; res['excess'] = final_excess_int
                 res['status'] = 'finished'; res['msg'] = "工单物料已领完/工单完结"
             else:
                 res['rate'] = min_material_rate
                 res['achievable'] = achievable
-                res['net_demand'] = int(eff_demand)
-                res['excess'] = int(excess_qty)
+                res['net_demand'] = final_net_demand_int
+                res['excess'] = final_excess_int
                 
                 fully_kitted = (min_material_rate >= 0.999)
                 
@@ -492,7 +512,7 @@ class DailyPlanAvailabilityApp:
                     msgs = []
                     if short_details: msgs.append("\n".join(short_details))
                     res['msg'] = "\n".join(msgs)
-                elif excess_qty > 0:
+                elif final_excess_int > 0:
                     res['status'] = 'warn'
                     res['msg'] = "此工单完结，排产超出工单数量"
                 else:
@@ -511,20 +531,16 @@ class DailyPlanAvailabilityApp:
 
     def _write_headers(self, ws, date_str):
         curr = 1
-        # 1. 写入保留的原表头
         for idx in KEEP_COL_INDICES:
-            # 尝试从映射中获取列名，如果没有则用默认值
-            header_name = self.header_names_map.get(idx, "")
-            c = ws.cell(1, curr); c.value = header_name
+            val = self.header_names_map.get(idx, "")
+            c = ws.cell(1, curr); c.value = val
             c.fill = self.header_fill; c.border = self.thin_border
             curr += 1
         
-        # 2. 新增日期列 (普通格式)
         c_date = ws.cell(1, curr); c_date.value = date_str; 
         c_date.font = Font(bold=True); c_date.fill = self.header_fill; c_date.border = self.thin_border
         curr += 1
 
-        # 3. 写入分析结果列
         new_cols = ["齐套率", "可产数量", "工单净需求", "超出工单数量", "缺料信息"]
         for h in new_cols:
             c = ws.cell(1, curr); c.value = h; c.font = Font(bold=True)
@@ -540,22 +556,19 @@ class DailyPlanAvailabilityApp:
         for i, (p, r) in enumerate(zip(plans, results)):
             ridx = i + 2
             curr = 1
-            # 1. 写入保留的基础数据
             for idx in KEEP_COL_INDICES:
                 c = ws.cell(ridx, curr); c.value = p['base'].get(idx)
                 c.font = font; c.border = self.thin_border; c.alignment = Alignment(vertical="center")
                 curr += 1
             
-            # 2. 写入当日排产数
             c_daily = ws.cell(ridx, curr); c_daily.value = p['qty']
             c_daily.font = Font(bold=True); c_daily.border = self.thin_border; c_daily.alignment = center
             curr += 1
 
-            # 3. 写入分析结果
             c_rate = ws.cell(ridx, curr); c_rate.value = r['rate']; c_rate.number_format = '0%'
             c_qty = ws.cell(ridx, curr+1); c_qty.value = r['achievable']
             c_net = ws.cell(ridx, curr+2)
-            if r['status'] == 'finished': c_net.value = "-"
+            if r['status'] == 'finished' and r['excess'] == 0: c_net.value = "-"
             else: c_net.value = r['net_demand']
             c_excess = ws.cell(ridx, curr+3); c_excess.value = r['excess']
             c_msg = ws.cell(ridx, curr+4); c_msg.value = r['msg']
