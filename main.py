@@ -72,8 +72,8 @@ KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v5.2 (逻辑修正版) - 驱动: {CURRENT_DRIVER}")
-        self.root.geometry("1000x700")
+        self.root.title(f"每日排程齐套分析工具 v5.3 (含净需求列) - 驱动: {CURRENT_DRIVER}")
+        self.root.geometry("1100x700") #稍微加宽窗口
 
         # 样式定义
         self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
@@ -414,7 +414,7 @@ class DailyPlanAvailabilityApp:
             batch_conds = conditions[i:i + batch_size]
             where_sql = " OR ".join(batch_conds)
 
-            # 修改点：查询增加 MB.MB004 作为 unit
+            # 查询增加 MB.MB004 (单位)
             sql = f"""
                 SELECT 
                     RTRIM(TA.TA001) as ta001, RTRIM(TA.TA002) as ta002, 
@@ -437,7 +437,7 @@ class DailyPlanAvailabilityApp:
                         all_data[k]['bom'].append({
                             'part': row['part_no'],
                             'name': row['part_name'],
-                            'unit': row['unit'],  # 存储单位
+                            'unit': row['unit'],
                             'req': float(row['req_qty']),
                             'iss': float(row['iss_qty'])
                         })
@@ -466,8 +466,9 @@ class DailyPlanAvailabilityApp:
 
     def _simulate(self, plans_data, wo_data, inventory):
         """
-        齐套率逻辑修改：取所有物料中齐套率的最小值。
-        缺料信息修改：换行显示，并增加单位。
+        修正逻辑：
+        1. 保持原有的最小齐套率计算逻辑（min(stock/net_demand)）。
+        2. 新增 max_net_demand_sets (工单净需求)，用于Excel展示分母，方便核对数据。
         """
         running_inv = inventory.copy()
         calculated_results = []
@@ -481,6 +482,7 @@ class DailyPlanAvailabilityApp:
             res_item = {
                 'rate': 0.0,
                 'achievable': 0,
+                'net_demand_sets': 0, # 新增：净需求套数 (分母)
                 'shortage_str': "",
                 'is_short': False
             }
@@ -493,15 +495,18 @@ class DailyPlanAvailabilityApp:
 
             wo_total_qty = info['total']
 
-            # --- 新逻辑开始 ---
-            min_kitting_rate = 1.0  # 默认为100%，逐个物料比较取最小
+            min_kitting_rate = 1.0 
             min_possible_sets = 9999999
+            
+            # 用于记录该工单在ERP层面最大的“净需求套数”
+            # 即：这单实际还需要多少套料？
+            max_net_demand_sets = 0.0 
             
             shortage_details_list = []
             to_deduct = {}
             is_fully_kitted = True
 
-            has_requirement = False # 标记该工单是否真的有物料需求
+            has_requirement = False 
 
             for bom in info['bom']:
                 part = bom['part']
@@ -511,6 +516,13 @@ class DailyPlanAvailabilityApp:
                 
                 # 净需求
                 net_demand = min(remain_issue, theo_demand)
+                
+                # 反推这一个物料对应的"套数需求"
+                # 用于计算 max_net_demand_sets (Excel显示用)
+                if unit_usage > 0:
+                    sets_demand = net_demand / unit_usage
+                    if sets_demand > max_net_demand_sets:
+                        max_net_demand_sets = sets_demand
 
                 if net_demand <= 0.0001: continue
                 
@@ -518,12 +530,12 @@ class DailyPlanAvailabilityApp:
                 to_deduct[part] = net_demand
                 current_stock = running_inv.get(part, 0)
 
-                # 1. 计算该物料的单独齐套率 (库存 / 净需求)
+                # 1. 计算齐套率 (保持原有逻辑)
                 item_rate = current_stock / net_demand if net_demand > 0 else 1.0
-                if item_rate > 1.0: item_rate = 1.0 # 单个物料齐套率最高100%
+                if item_rate > 1.0: item_rate = 1.0
                 min_kitting_rate = min(min_kitting_rate, item_rate)
 
-                # 2. 计算可产数量 (木桶效应)
+                # 2. 计算可产数量
                 can_make = int(current_stock // unit_usage) if unit_usage > 0 else 999999
                 min_possible_sets = min(min_possible_sets, can_make)
 
@@ -531,30 +543,34 @@ class DailyPlanAvailabilityApp:
                 if current_stock < net_demand - 0.0001:
                     is_fully_kitted = False
                     short_qty = net_demand - current_stock
-                    # 格式化：换行，增加单位。使用 :g 去除不必要的 .0
                     unit_str = bom['unit']
                     shortage_details_list.append(f"{part} {bom['name']}(缺{short_qty:g}{unit_str})")
 
             # 修正可产数量
             actual_possible_sets = min(int(daily_qty), min_possible_sets)
             
-            # 如果没有物料需求（不需要领料），则视为齐套
+            # 如果没有净需求（不需要领料）
             if not has_requirement:
                 actual_possible_sets = int(daily_qty)
                 is_fully_kitted = True
                 min_kitting_rate = 1.0
+                max_net_demand_sets = 0 # 没有欠料
+
+            # 如果 max_net_demand_sets 为0 (可能是浮点误差或完全没需求)，但有排产，
+            # 为了数据展示，可以视为全齐套
+            if max_net_demand_sets < 0.0001 and has_requirement:
+                 max_net_demand_sets = daily_qty # 兜底逻辑
 
             res_item['rate'] = min_kitting_rate
             res_item['achievable'] = actual_possible_sets
+            res_item['net_demand_sets'] = int(max_net_demand_sets) # 存入结果
             res_item['is_short'] = not is_fully_kitted
             
             if shortage_details_list:
-                # 使用换行符连接
                 res_item['shortage_str'] = "\n".join(shortage_details_list)
 
             calculated_results.append(res_item)
 
-            # 库存扣减 (All-or-Nothing)
             if is_fully_kitted:
                 for part, qty in to_deduct.items():
                     running_inv[part] -= qty
@@ -570,7 +586,8 @@ class DailyPlanAvailabilityApp:
             cell.border = self.thin_border
             current_col += 1
 
-        new_headers = ["齐套率", "可产数量", "缺料信息"]
+        # 修改表头：插入 "净需求"
+        new_headers = ["齐套率", "可产数量", "净需求", "缺料信息"]
         for h in new_headers:
             cell = ws.cell(row=1, column=current_col)
             cell.value = h
@@ -583,7 +600,6 @@ class DailyPlanAvailabilityApp:
         self._write_headers(ws)
 
         font_normal = Font(name="微软雅黑", size=9)
-        # 允许换行
         align_wrap = Alignment(vertical="center", wrap_text=True)
         align_center = Alignment(vertical="center", horizontal="center", wrap_text=False)
 
@@ -614,9 +630,15 @@ class DailyPlanAvailabilityApp:
             c_qty.value = res['achievable']
             c_qty.border = self.thin_border
             c_qty.alignment = align_center
+            
+            # 净需求 (新增列)
+            c_net = ws.cell(row=row_idx, column=current_col + 2)
+            c_net.value = res['net_demand_sets']
+            c_net.border = self.thin_border
+            c_net.alignment = align_center
 
-            # 缺料信息 (设置自动换行)
-            c_info = ws.cell(row=row_idx, column=current_col + 2)
+            # 缺料信息
+            c_info = ws.cell(row=row_idx, column=current_col + 3)
             c_info.value = res['shortage_str']
             c_info.alignment = align_wrap 
             c_info.border = self.thin_border
@@ -626,12 +648,13 @@ class DailyPlanAvailabilityApp:
             fill = self.red_fill if res['is_short'] else self.green_fill
             c_rate.fill = fill
             c_qty.fill = fill
+            c_net.fill = fill
             c_info.fill = fill
 
         # 设置列宽
         ws.column_dimensions['A'].width = 15
-        # 最后一列缺料信息加宽，适应长文本
-        ws.column_dimensions[openpyxl.utils.get_column_letter(len(KEEP_COL_INDICES) + 3)].width = 60
+        # 缺料信息在最后一列 (index + 4)
+        ws.column_dimensions[openpyxl.utils.get_column_letter(len(KEEP_COL_INDICES) + 4)].width = 60
 
 
 if __name__ == "__main__":
