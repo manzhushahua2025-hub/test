@@ -34,23 +34,23 @@ DB_CONN_STRING = (
     "UID=zhitan;PWD=Zt@forcome;TrustServerCertificate=yes;"
 )
 
-# --- 关键修正：根据您的截图，表头在第3行 ---
-ROW_IDX_HEADER_MAIN = 3
-ROW_IDX_HEADER_DATE = 3
-ROW_IDX_DATA_START = 4
+# --- 关键修正 1: 根据截图，表头位于第3行 ---
+ROW_IDX_HEADER_MAIN = 3  
+ROW_IDX_HEADER_DATE = 3  
+ROW_IDX_DATA_START = 4   
 
 COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
 COL_NAME_WO_NO = "工单单号"
 
-# 15 代表 O列 (排产数量)
+# 15 代表 O列 (原始表中的“排产数量”列位置)
 KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 
 # ============== 应用程序类 ==============
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v8.7 (排产量显示修复版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析工具 v9.0 (表头与排产量终极修正版) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
         # 颜色定义
@@ -127,6 +127,7 @@ class DailyPlanAvailabilityApp:
         if path:
             self.file_path.set(path)
             try:
+                # read_only=True 模式下，openpyxl 会读取所有行，包括被筛选隐藏的行
                 wb = openpyxl.load_workbook(path, read_only=True)
                 self.sheet_combo['values'] = wb.sheetnames
                 if wb.sheetnames:
@@ -146,6 +147,7 @@ class DailyPlanAvailabilityApp:
             ws = wb[sheet_name]
             self.col_map_main = {}
             self.header_names_map = {}
+            # 修正：从第3行读取表头
             for idx, cell in enumerate(ws[ROW_IDX_HEADER_MAIN], start=1):
                 val = str(cell.value).strip() if cell.value else ""
                 if val: self.col_map_main[val] = idx
@@ -228,6 +230,7 @@ class DailyPlanAvailabilityApp:
             if "Sheet" in new_wb.sheetnames: del new_wb["Sheet"]
 
             self._log("正在预加载所有日期的排产数据...")
+            # openpyxl 的 read_only 模式会自动忽略筛选，读取所有行数据
             all_plans_by_date = {} 
             all_wo_keys = set()
             
@@ -285,6 +288,7 @@ class DailyPlanAvailabilityApp:
             messagebox.showerror("运行错误", str(e))
 
     def _extract_data(self, file_path, sheet_name, col_idx, filter_ws):
+        # 即使文件被筛选过，read_only=True 也会遍历所有物理行
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         ws = wb[sheet_name]
         c_ws = self.col_map_main.get(COL_NAME_WORKSHOP)
@@ -303,7 +307,7 @@ class DailyPlanAvailabilityApp:
                     
                     row_dict = {}
                     for ti in KEEP_COL_INDICES:
-                        # --- 关键修改：强制用当日排产数 qty 替换第15列(O列) ---
+                        # --- 关键修改 2: 强制将导出的“排产数量”列(O列)替换为当日排产数 qty ---
                         if ti == 15:
                             row_dict[ti] = float(qty)
                         else:
