@@ -42,20 +42,22 @@ COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
 COL_NAME_WO_NO = "工单单号"
 
+# 15 代表 O列 (排产数量)
 KEEP_COL_INDICES = [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 20]
 
 # ============== 应用程序类 ==============
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析工具 v8.2 (防报错修复版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析工具 v8.6 (缺料显示优化版) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
-        # 样式定义
-        self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
-        self.green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
-        self.yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid") 
-        self.gray_fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid") 
+        # 颜色定义
+        self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")     # 红色：缺料
+        self.green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")   # 绿色：齐套
+        self.yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")  # 黄色：排产超出
+        self.gray_fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")    # 灰色：已领完/完结
+        
         self.header_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
         self.thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
                                   top=Side(style='thin'), bottom=Side(style='thin'))
@@ -220,12 +222,10 @@ class DailyPlanAvailabilityApp:
         try:
             self._log("="*50)
             self._log(f"开始跨天强行推演... 共 {len(valid_dates)} 天")
-            self._log("说明: 每日结束后，将按【排产全量】(包含超出部分) 扣减库存。")
             
             new_wb = openpyxl.Workbook()
             if "Sheet" in new_wb.sheetnames: del new_wb["Sheet"]
 
-            # --- 阶段1: 预加载 ---
             self._log("正在预加载所有日期的排产数据...")
             all_plans_by_date = {} 
             all_wo_keys = set()
@@ -250,14 +250,12 @@ class DailyPlanAvailabilityApp:
             
             static_inventory = self._fetch_inventory(list(all_parts))
 
-            # --- 阶段2: 初始化滚动状态 ---
             running_inv = copy.deepcopy(static_inventory)
             running_wo_issued = defaultdict(float)
             for k, v in static_wo_data.items():
                 for b in v['bom']:
                     running_wo_issued[(k[0], k[1], b['part'])] = b['iss']
 
-            # --- 阶段3: 逐日推演 ---
             for d in valid_dates:
                 sheet_title = d.strftime("%Y-%m-%d")
                 self._log(f"推演日期: {sheet_title}")
@@ -269,7 +267,6 @@ class DailyPlanAvailabilityApp:
                     self._write_headers(new_ws)
                     continue
 
-                # 传入滚动状态计算，并更新状态
                 results = self._simulate_logic_rolling_forced(
                     plans, static_wo_data, running_inv, running_wo_issued
                 )
@@ -298,13 +295,18 @@ class DailyPlanAvailabilityApp:
             try:
                 if col_idx > len(row): continue
                 qty = row[col_idx-1].value
+                
                 if isinstance(qty, (int, float)) and qty > 0:
                     curr_ws = str(row[c_ws-1].value).strip() if (c_ws and row[c_ws-1].value) else "未分类"
                     if filter_ws != "全部车间" and curr_ws != filter_ws: continue
                     
                     row_dict = {}
                     for ti in KEEP_COL_INDICES:
-                        row_dict[ti] = row[ti-1].value if ti <= len(row) else None
+                        # 强制替换 O列(第15列) 的值为当日排产数
+                        if ti == 15:
+                            row_dict[ti] = float(qty)
+                        else:
+                            row_dict[ti] = row[ti-1].value if ti <= len(row) else None
                     
                     wt = row[c_type-1].value
                     wn = row[c_no-1].value
@@ -363,11 +365,6 @@ class DailyPlanAvailabilityApp:
         return inv
 
     def _simulate_logic_rolling_forced(self, plans, wo_data, running_inv, running_wo_issued):
-        """
-        v8.2 修复版逻辑:
-        1. 按照 min(ERP, Plan) 计算当天的缺料情况 (展示用)。
-        2. 按照 Plan (全量) 扣减库存 (推演用)，并处理缺省KeyError。
-        """
         results = []
 
         for p in plans:
@@ -385,7 +382,7 @@ class DailyPlanAvailabilityApp:
                 res['msg'] = "无ERP信息"; res['status'] = 'error'
                 results.append(res); continue
 
-            # --- 步骤1: 确定工单净需求 (展示当前状态) ---
+            # 1. 工单净需求
             eff_demand = plan_qty 
             for b in info['bom']:
                 unit_use = b['req'] / info['total'] if info['total'] > 0 else 0
@@ -398,77 +395,85 @@ class DailyPlanAvailabilityApp:
                     if max_sets < eff_demand:
                         eff_demand = max_sets
             
-            # --- 步骤2: 计算超出部分 ---
+            # 2. 超出部分
             excess_qty = 0
             if eff_demand < plan_qty:
                 excess_qty = plan_qty - eff_demand
                 if excess_qty < 0.0001: excess_qty = 0
             
-            # --- 步骤3: 计算齐套/缺料 (基于有效需求 eff_demand) ---
+            # 3. 齐套率/缺料
             min_material_rate = 1.0 
             min_possible_sets = 999999
             short_details = []
             
-            # 记录需要扣减的库存 (Plan全量)
             to_deduct_full = {} 
 
             for b in info['bom']:
                 unit_use = b['req'] / info['total'] if info['total'] > 0 else 0
                 if unit_use <= 0: continue
                 
-                # 1. 展示用的缺料计算 (基于有效需求)
                 part_net_demand = eff_demand * unit_use
                 stock = running_inv.get(b['part'], 0)
                 
                 if part_net_demand > 0:
-                    part_rate = stock / part_net_demand if stock > 0 else 0
+                    effective_stock = max(0, stock)
+                    part_rate = effective_stock / part_net_demand
                     if part_rate > 1.0: part_rate = 1.0
                     if part_rate < min_material_rate:
                         min_material_rate = part_rate
                 
-                can_do = int(stock // unit_use)
+                can_do = int(max(0, stock) // unit_use)
                 min_possible_sets = min(min_possible_sets, can_do)
                 
                 if stock < part_net_demand - 0.0001:
                     diff = part_net_demand - stock
-                    short_details.append(f"{b['name']}缺{diff:g}{b['unit']}")
+                    # --- 修正点 v8.6: 格式化为 品名(品号)缺数量单位 ---
+                    short_details.append(f"{b['name']}({b['part']})缺{diff:g}{b['unit']}")
                 
-                # 2. 推演用的扣减量 (基于排产全量，含Excess)
                 full_demand = plan_qty * unit_use
                 to_deduct_full[b['part']] = full_demand
 
-            # --- 步骤4: 汇总结果 ---
             achievable = min(int(eff_demand), min_possible_sets)
             
+            # ----------------- 状态与文字定义修正区 -----------------
+            
+            # 灰色：工单物料已领完/工单完结
             if eff_demand < 0.001:
                 res['rate'] = 1.0; res['achievable'] = 0
                 res['net_demand'] = 0; res['excess'] = int(plan_qty)
-                res['status'] = 'finished'; res['msg'] = "工单已领完/结案"
+                res['status'] = 'finished'; res['msg'] = "工单物料已领完/工单完结"
             else:
                 res['rate'] = min_material_rate
                 res['achievable'] = achievable
                 res['net_demand'] = int(eff_demand)
                 res['excess'] = int(excess_qty)
                 
-                msgs = []
-                if short_details: msgs.append("\n".join(short_details))
-                res['msg'] = "\n".join(msgs)
-                
                 fully_kitted = (min_material_rate >= 0.999)
-                if not fully_kitted: res['status'] = 'short'
-                elif excess_qty > 0: res['status'] = 'warn'
-                else: res['status'] = 'ok'
+                
+                if not fully_kitted:
+                    # 红色：缺料
+                    res['status'] = 'short'
+                    msgs = []
+                    if short_details: msgs.append("\n".join(short_details))
+                    res['msg'] = "\n".join(msgs)
+                
+                elif excess_qty > 0:
+                    # 黄色：此工单完结，排产超出工单数量
+                    res['status'] = 'warn'
+                    res['msg'] = "此工单完结，排产超出工单数量"
+                
+                else:
+                    # 绿色：齐套
+                    res['status'] = 'ok'
+                    res['msg'] = "齐套"
             
             results.append(res)
             
-            # --- 关键步骤5: 更新滚动状态 (强行扣减全量) ---
+            # 扣减库存 (强行推演)
             for part, qty in to_deduct_full.items():
-                # 修复点：如果库存字典里没有这个料(KeyError)，先初始化为0，再扣减
-                if part not in running_inv:
-                    running_inv[part] = 0.0
-                
-                running_inv[part] -= qty # 扣全量
-                running_wo_issued[(key[0], key[1], part)] += qty # 假设全发了
+                if part not in running_inv: running_inv[part] = 0.0
+                running_inv[part] -= qty 
+                running_wo_issued[(key[0], key[1], part)] += qty
 
         return results
 
