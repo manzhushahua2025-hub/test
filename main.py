@@ -34,7 +34,7 @@ COL_NAME_WO_NO = "工单单号"
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析 v12.0 (另存标注版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程齐套分析 v12.1 (报错修复版) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
         self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")     
@@ -153,7 +153,6 @@ class DailyPlanAvailabilityApp:
         valid_dates = sorted([d for d in self.date_column_map if start_dt <= d <= end_dt])
         if not valid_dates: messagebox.showwarning("提示", "未找到有效日期列"); return
 
-        # 生成导出文件名
         if start_dt == end_dt:
             default_fname = f"{start_dt.strftime('%Y%m%d')}齐套信息.xlsx"
         else:
@@ -168,21 +167,22 @@ class DailyPlanAvailabilityApp:
             c_type, c_no, c_ws = self.col_map_main.get(COL_NAME_WO_TYPE, 5), self.col_map_main.get(COL_NAME_WO_NO, 6), self.col_map_main.get(COL_NAME_WORKSHOP)
             target_ws = self.selected_workshop.get()
             
-            # 使用 values_only=False 确保获取 Cell 对象以便提取行号
+            # 加载原始文件提速
             wb_fast = openpyxl.load_workbook(self.file_path.get(), read_only=True, data_only=True)
             ws_fast = wb_fast[self.sheet_name.get()]
+            
             for d in valid_dates:
                 col_idx = self.date_column_map[d]
-                # 显式访问 row 对象，解决 image_49afdf 中的 EmptyCell 报错
-                for row_cells in ws_fast.iter_rows(min_row=ROW_IDX_DATA_START):
+                # --- 修复点：使用 enumerate 确保获取物理行号，避开 EmptyCell 报错 ---
+                for row_idx, row_cells in enumerate(ws_fast.iter_rows(min_row=ROW_IDX_DATA_START), start=ROW_IDX_DATA_START):
                     qty = row_cells[col_idx-1].value
                     if isinstance(qty, (int, float)) and qty > 0:
                         if c_ws and target_ws != "全部车间" and str(row_cells[c_ws-1].value).strip() != target_ws: continue
                         wt, wn = row_cells[c_type-1].value, row_cells[c_no-1].value
                         if wt and wn:
                             key = (str(wt).strip(), str(wn).strip()); all_wo_keys.add(key)
-                            # 使用当前行单元格对象的 row 属性
-                            plan_data_rows.append((row_cells[0].row, d, int(round(float(qty))), key))
+                            # 使用 enumerate 得到的 row_idx，不再访问单元格对象的 .row 属性
+                            plan_data_rows.append((row_idx, d, int(round(float(qty))), key))
             wb_fast.close()
 
             if not all_wo_keys: messagebox.showinfo("完成", "无产量记录"); return
@@ -224,7 +224,6 @@ class DailyPlanAvailabilityApp:
                         running_inv[b['part']] -= (plan_qty * u)
                         running_issued[(key[0], key[1], b['part'])] += (plan_qty * u)
 
-                # 标注文本格式
                 msg = f"齐套率为{min_rate:.0%}；可产数量为{min(net, stock_can_do)}个；工单净需求量为{net}个；超出工单的数量为{excess}个；此工单的缺料信息：{','.join(shorts) if shorts else '无'}"
                 if len(valid_dates) > 1: msg = f"[{d.strftime('%m-%d')}] " + msg
                 final_res[ridx].append(msg)
@@ -241,12 +240,10 @@ class DailyPlanAvailabilityApp:
                 if sn != target_sn: del wb_write[sn]
             
             ws = wb_write[target_sn]
-            
-            # --- A 列强制标题重命名与显示 ---
             for r_title in range(1, 4):
                 ws.cell(row=r_title, column=1).value = "齐套信息"
                 ws.cell(row=r_title, column=1).font = Font(bold=True)
-            ws.column_dimensions['A'].hidden = False # 强制显示
+            ws.column_dimensions['A'].hidden = False 
             ws.column_dimensions['A'].width = 85
             
             for ridx, msgs in final_res.items():
