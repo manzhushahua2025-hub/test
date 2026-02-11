@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import openpyxl
-from openpyxl.cell.cell import MergedCell # 核心：导入合并单元格判断类
+from openpyxl.cell.cell import MergedCell 
 import pyodbc
 import traceback
 import datetime
@@ -13,7 +13,7 @@ from collections import defaultdict
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from tkcalendar import DateEntry
 
-# ============== 1. 数据库查询逻辑 (锁定) ==============
+# ============== 1. 数据库查询逻辑 (严格锁定) ==============
 def get_best_sql_driver():
     try:
         installed_drivers = [d for d in pyodbc.drivers()]
@@ -26,7 +26,7 @@ def get_best_sql_driver():
 CURRENT_DRIVER = get_best_sql_driver()
 DB_CONN_STRING = f"DRIVER={{{CURRENT_DRIVER}}};SERVER=192.168.0.117;DATABASE=FQD;UID=zhitan;PWD=Zt@forcome;TrustServerCertificate=yes;"
 
-# ============== 2. 业务基础配置 ==============
+# ============== 2. 基础业务配置 ==============
 ROW_IDX_DATA_START = 4   
 COL_NAME_WORKSHOP = "车间"
 COL_NAME_WO_TYPE = "单别"
@@ -35,7 +35,7 @@ COL_NAME_WO_NO = "工单单号"
 class DailyPlanAvailabilityApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"每日排程齐套分析 v12.6 (A列强制显示版) - {CURRENT_DRIVER}")
+        self.root.title(f"每日排程分析 v12.7 (新增列模式) - {CURRENT_DRIVER}")
         self.root.geometry("1150x750")
 
         self.red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")     
@@ -54,7 +54,7 @@ class DailyPlanAvailabilityApp:
     def _create_widgets(self):
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
-        file_frame = ttk.LabelFrame(main_frame, text="1. 选择数据源", padding="5")
+        file_frame = ttk.LabelFrame(main_frame, text="1. 选择计划源文件", padding="5")
         file_frame.pack(fill=tk.X, pady=5)
         ttk.Entry(file_frame, textvariable=self.file_path, width=50).pack(side=tk.LEFT, padx=5)
         ttk.Button(file_frame, text="浏览...", command=self._select_file).pack(side=tk.LEFT, padx=5)
@@ -62,7 +62,7 @@ class DailyPlanAvailabilityApp:
         self.sheet_combo.pack(side=tk.LEFT, padx=5)
         self.sheet_combo.bind("<<ComboboxSelected>>", self._on_sheet_selected)
         
-        filter_frame = ttk.LabelFrame(main_frame, text="2. 分析参数", padding="10")
+        filter_frame = ttk.LabelFrame(main_frame, text="2. 分析参数 (结果将插入至新列并上色)", padding="10")
         filter_frame.pack(fill=tk.X, pady=5)
         date_frame = ttk.Frame(filter_frame); date_frame.pack(side=tk.LEFT, fill=tk.X)
         ttk.Checkbutton(date_frame, text="日期范围", variable=self.is_date_range, command=self._toggle_date_mode).pack(side=tk.LEFT, padx=(0, 10))
@@ -73,7 +73,7 @@ class DailyPlanAvailabilityApp:
         self.workshop_combo = ttk.Combobox(filter_frame, textvariable=self.selected_workshop, state="disabled", width=15); self.workshop_combo.pack(side=tk.LEFT, padx=5)
         
         action_frame = ttk.LabelFrame(main_frame, text="3. 执行", padding="10"); action_frame.pack(fill=tk.X, pady=10)
-        ttk.Button(action_frame, text="执行分析并另存副本 (A列标注)", command=self._run_analysis).pack(fill=tk.X, padx=100)
+        ttk.Button(action_frame, text="开始执行分析并导出副本", command=self._run_analysis).pack(fill=tk.X, padx=100)
         self.log_text = tk.Text(main_frame, height=15, state="disabled", font=("Consolas", 9), bg="#F0F0F0"); self.log_text.pack(fill=tk.BOTH, expand=True, pady=5)
 
     def _toggle_date_mode(self):
@@ -96,7 +96,7 @@ class DailyPlanAvailabilityApp:
         try:
             wb = openpyxl.load_workbook(self.file_path.get(), read_only=True, data_only=True)
             ws = wb[self.sheet_name.get()]; self.col_map_main = {}
-            for r in [3, 2]: # v10.4 混合扫描
+            for r in [3, 2]: # v10.4 混合扫描表头
                 for idx, cell in enumerate(ws[r], start=1):
                     val = str(cell.value).strip() if cell.value else ""
                     if val and val not in self.col_map_main: self.col_map_main[val] = idx
@@ -110,7 +110,7 @@ class DailyPlanAvailabilityApp:
                 for row in ws.iter_rows(min_row=ROW_IDX_DATA_START, min_col=col_ws_idx, max_col=col_ws_idx, values_only=True):
                     if row[0]: workshops.add(str(row[0]).strip())
             self.workshop_combo['values'] = ["全部车间"] + sorted(list(workshops)); self.workshop_combo.current(0); self.workshop_combo.config(state="readonly"); wb.close()
-        except: self._log("读取表头出错")
+        except: self._log("基础表头识别失败")
 
     def _parse_excel_date(self, val):
         if val is None: return None
@@ -124,7 +124,7 @@ class DailyPlanAvailabilityApp:
             return None
         except: return None
 
-    # ============== 3. ERP 查询与计算逻辑 (严格锁定) ==============
+    # ============== 3. ERP 查询逻辑 (锁定) ==============
     def _fetch_erp_data(self, keys):
         if not keys: return {}
         conditions = [f"(TA.TA001='{t}' AND TA.TA002='{n}')" for t, n in keys]
@@ -150,18 +150,18 @@ class DailyPlanAvailabilityApp:
                 df = pd.read_sql(sql, conn); inv.update(pd.Series(df.q.values, index=df.p).to_dict())
         return inv
 
-    # ============== 4. 核心处理流程 (修复合并单元格及隐藏 A 列问题) ==============
+    # ============== 4. 业务核心逻辑 (解决报错并实现插入列) ==============
     def _run_analysis(self):
         start_dt = self.date_start.get_date(); end_dt = self.date_end.get_date() if self.is_date_range.get() else start_dt
         valid_dates = sorted([d for d in self.date_column_map if start_dt <= d <= end_dt])
-        if not valid_dates: messagebox.showwarning("提示", "日期范围无产量数据列"); return
+        if not valid_dates: messagebox.showwarning("提示", "未找到日期对应的排产数据列"); return
 
         dt_str = start_dt.strftime('%Y%m%d') if start_dt == end_dt else f"{start_dt.strftime('%Y%m%d')}-{end_dt.strftime('%Y%m%d')}"
-        save_path = filedialog.asksaveasfilename(initialfile=f"{dt_str}齐套信息.xlsx", defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
+        save_path = filedialog.asksaveasfilename(initialfile=f"{dt_str}齐套分析副本.xlsx", defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
         if not save_path: return
 
         try:
-            self._log("第一步：预读排产计划...")
+            self._log("第一步：预加载产量数据...")
             plan_data_rows, all_wo_keys = [], set()
             c_type, c_no, c_ws = self.col_map_main.get(COL_NAME_WO_TYPE, 5), self.col_map_main.get(COL_NAME_WO_NO, 6), self.col_map_main.get(COL_NAME_WORKSHOP)
             target_ws = self.selected_workshop.get()
@@ -171,6 +171,7 @@ class DailyPlanAvailabilityApp:
             
             for d in valid_dates:
                 col_idx = self.date_column_map[d]
+                # 修复 EmptyCell 报错：直接使用 enumerate 获得物理行号
                 for ridx, row_cells in enumerate(ws_fast.iter_rows(min_row=ROW_IDX_DATA_START), start=ROW_IDX_DATA_START):
                     qty = row_cells[col_idx-1].value
                     if isinstance(qty, (int, float)) and qty > 0:
@@ -181,12 +182,14 @@ class DailyPlanAvailabilityApp:
                             plan_data_rows.append((ridx, d, int(round(float(qty))), key))
             wb_fast.close()
 
-            if not all_wo_keys: messagebox.showinfo("完成", "无产量记录"); return
+            if not all_wo_keys: messagebox.showinfo("完成", "所选范围内无生产计划"); return
 
             self._log("第二步：同步 ERP 与库存数据..."); static_wo_data = self._fetch_erp_data(list(all_wo_keys))
-            inv = self._fetch_inventory([b['part'] for w in static_wo_data.values() for b in w['bom']])
+            all_parts = [b['part'] for w in static_wo_data.values() for b in w['bom']]
+            inv = self._fetch_inventory(all_parts)
 
-            self._log("第三步：执行库存分析..."); running_inv, running_issued = copy.deepcopy(inv), defaultdict(float)
+            self._log("第三步：执行库存推演分析 (锁定 v10.7 闭环)...")
+            running_inv, running_issued = copy.deepcopy(inv), defaultdict(float)
             for k, v in static_wo_data.items():
                 for b in v['bom']: running_issued[(k[0], k[1], b['part'])] = b['iss']
             
@@ -195,12 +198,13 @@ class DailyPlanAvailabilityApp:
             for ridx, d, plan_qty, key in plan_data_rows:
                 info = static_wo_data.get(key)
                 if not info: continue
+                # 业务逻辑：校验已领料情况下的工单上限
                 max_erp = 999999
                 for b in info['bom']:
                     u = b['req']/info['total'] if info['total']>0 else 0
                     if u > 0:
-                        rem = max(0, b['req'] - running_issued.get((key[0], key[1], b['part']), 0))
-                        max_erp = min(max_erp, int(rem // u))
+                        rem_quota = max(0, b['req'] - running_issued.get((key[0], key[1], b['part']), 0))
+                        max_erp = min(max_erp, int(rem_quota // u))
                 
                 net = min(plan_qty, max_erp); excess = plan_qty - net
                 min_rate, stock_can_do, shorts = 1.0, 999999, []
@@ -217,42 +221,47 @@ class DailyPlanAvailabilityApp:
                         running_inv[b['part']] = running_inv.get(b['part'], 0) - (plan_qty * u)
                         running_issued[(key[0], key[1], b['part'])] = running_issued.get((key[0], key[1], b['part']), 0) + (plan_qty * u)
 
+                # 生成 A 列标注文本
                 msg = f"齐套率为{min_rate:.0%}；可产数量为{min(net, stock_can_do)}个；工单净需求量为{net}个；超出工单的数量为{excess}个；此工单的缺料信息：{','.join(shorts) if shorts else '无'}"
                 if len(valid_dates) > 1: msg = f"[{d.strftime('%m-%d')}] " + msg
                 final_res[ridx].append(msg)
-                prio = 1
-                if net == 0 and excess > 0: prio = 2
-                elif min_rate < 0.999: prio = 4
-                elif excess > 0: prio = 3
+                
+                prio = 1 # 绿
+                if net == 0 and excess > 0: prio = 2 # 灰
+                elif min_rate < 0.999: prio = 4 # 红
+                elif excess > 0: prio = 3   # 黄
                 if prio > final_col[ridx]: final_col[ridx] = prio
 
-            self._log("第四步：回写标注并强制显示 A 列...")
+            self._log("第四步：插入新列并回写标注内容...")
             wb_write = openpyxl.load_workbook(self.file_path.get())
             target_sn = self.sheet_name.get()
             for sn in wb_write.sheetnames:
-                if sn != target_sn: del wb_write[sn]
+                if sn != target_sn: del wb_write[sn] # 提速
             
             ws = wb_write[target_sn]
             
-            # --- 关键修复：修改 A2 (主单元格)，跳过 A3 (从属合并格) ---
-            # 这样即修改了标题，又避开了 MergedCell 只读报错
-            cell_a2 = ws.cell(row=2, column=1)
-            if not isinstance(cell_a2, MergedCell):
-                cell_a2.value = "齐套信息"
-                cell_a2.font = Font(bold=True)
-                cell_a2.alignment = Alignment(horizontal="center", vertical="center")
+            # --- 核心改进：在 B 列左侧插入一列 (原 B 列变为 C 列) ---
+            ws.insert_cols(2)
             
-            # 强制显示并拉宽 A 列
-            ws.column_dimensions['A'].hidden = False
-            ws.column_dimensions['A'].width = 85
+            # 设置新列 B 的标题
+            for r_head in range(2, 4):
+                cell_h = ws.cell(row=r_head, column=2)
+                # 即使新插入列，也进行合并检查以防万一
+                if not isinstance(cell_h, MergedCell):
+                    cell_h.value = "齐套信息"
+                    cell_h.font = Font(bold=True)
+                    cell_h.alignment = Alignment(horizontal="center", vertical="center")
             
+            ws.column_dimensions['B'].width = 80
+            
+            # 写入分析结果到新插入的 B 列 (第2列)
             for ridx, msgs in final_res.items():
-                cell = ws.cell(row=ridx, column=1)
-                # 数据行如果存在合并，同样需要保护
+                cell = ws.cell(row=ridx, column=2)
                 if not isinstance(cell, MergedCell):
                     cell.value = "\n".join(msgs)
                     cell.alignment = Alignment(wrapText=True, vertical="center")
                     cell.font = Font(size=9)
+                    
                     cp = final_col[ridx]
                     if cp == 4: cell.fill = self.red_fill
                     elif cp == 3: cell.fill = self.yellow_fill
@@ -260,7 +269,7 @@ class DailyPlanAvailabilityApp:
                     elif cp == 1: cell.fill = self.green_fill
 
             wb_write.save(save_path)
-            self._log("分析完成！副本已成功导出并显示。"); messagebox.showinfo("成功", "齐套信息已标注并强制显示。")
+            self._log("全部完成！副本已保存。"); messagebox.showinfo("成功", "齐套信息已标注至副本 B 列。")
             
         except Exception as e:
             traceback.print_exc(); self._log(f"程序报错: {str(e)}")
